@@ -28,14 +28,10 @@
 #define HALL_WHEEL_CIRCUMFERENCE_MM     (200U)
 
 /*
- * 네가 확인한 D0 상태:
- *
- * 자석 가까움 -> P02.7 LOW  = 0
- * 자석 멀어짐 -> P02.7 HIGH = 1
- *
- * 따라서 Active Low가 맞음.
+ * 속도 계산 주기 [ms]
+ * Scheduler.c의 task_50ms()에서 HallSensor_calcSpeed50ms()를 호출하므로 50ms.
  */
-#define HALL_ACTIVE_LOW                 (1U)
+#define HALL_SPEED_CALC_PERIOD_MS       (50U)
 
 /*********************************************************************************************************************/
 /*------------------------------------------------Static variables---------------------------------------------------*/
@@ -67,6 +63,14 @@ volatile uint8_t debugHallRawLevel = 0U;
 volatile uint8_t debugHallDetected = 0U;
 
 /*********************************************************************************************************************/
+/*------------------------------------------------Private prototypes-------------------------------------------------*/
+/*********************************************************************************************************************/
+
+static uint8_t HallSensor_readRawLevel(void);
+static uint8_t HallSensor_convertRawToDetected(uint8_t rawLevel);
+static void    HallSensor_updateDebug(uint8_t rawLevel, uint8_t detected);
+
+/*********************************************************************************************************************/
 /*------------------------------------------------Public functions---------------------------------------------------*/
 /*********************************************************************************************************************/
 
@@ -95,87 +99,35 @@ void HallSensor_init(void)
 
 uint8_t HallSensor_isDetected(void)
 {
-    IfxPort_State state;
+    uint8_t rawLevel;
+    uint8_t detected;
 
-    state = IfxPort_getPinState(HALL_PORT, HALL_PIN_INDEX);
+    rawLevel = HallSensor_readRawLevel();
+    detected = HallSensor_convertRawToDetected(rawLevel);
 
-    /*
-     * raw level 저장
-     */
-    if(state == IfxPort_State_high)
-    {
-        debugHallRawLevel = 1U;
-    }
-    else
-    {
-        debugHallRawLevel = 0U;
-    }
+    HallSensor_updateDebug(rawLevel, detected);
 
-#if HALL_ACTIVE_LOW
-    /*
-     * 자석 가까움: LOW -> detected 1
-     * 자석 멀어짐: HIGH -> detected 0
-     */
-    if(state == IfxPort_State_low)
-    {
-        return 1U;
-    }
-    else
-    {
-        return 0U;
-    }
-#else
-    if(state == IfxPort_State_high)
-    {
-        return 1U;
-    }
-    else
-    {
-        return 0U;
-    }
-#endif
+    return detected;
 }
 
 void HallSensor_update1ms(void)
 {
-    IfxPort_State state;
+    uint8_t rawLevel;
     uint8_t nowDetected;
 
-    state = IfxPort_getPinState(HALL_PORT, HALL_PIN_INDEX);
+    rawLevel = HallSensor_readRawLevel();
+    nowDetected = HallSensor_convertRawToDetected(rawLevel);
 
-    /*
-     * 실제 P02.7 입력 레벨
-     * 자석 가까움: 0
-     * 자석 멀음  : 1
-     */
-    if(state == IfxPort_State_high)
-    {
-        debugHallRawLevel = 1U;
-    }
-    else
-    {
-        debugHallRawLevel = 0U;
-    }
+    HallSensor_updateDebug(rawLevel, nowDetected);
 
-    /*
-     * 네 센서는 active-low로 확인됨.
-     * 자석 가까움: raw 0 -> detected 1
-     * 자석 멀음  : raw 1 -> detected 0
-     */
-    if(debugHallRawLevel == 0U)
-    {
-        nowDetected = 1U;
-    }
-    else
-    {
-        nowDetected = 0U;
-    }
-
-    debugHallDetected = nowDetected;
     s_detected = nowDetected;
 
     /*
-     * 자석이 처음 가까워지는 순간만 pulse 1개 증가
+     * 자석이 처음 가까워지는 순간만 pulse 1개 증가.
+     *
+     * 즉,
+     * 자석 멀어짐 -> 자석 가까움
+     * 0 -> 1 전이에서만 count 증가.
      */
     if((s_prevDetected == 0U) && (nowDetected == 1U))
     {
@@ -207,11 +159,9 @@ void HallSensor_calcSpeed50ms(void)
      *
      * speed[km/h] x10
      * = diffPulse * wheel_circumference_mm * 36 / (period_ms * magnets)
-     *
-     * period_ms = 50ms
      */
     numerator = diffPulse * HALL_WHEEL_CIRCUMFERENCE_MM * 36U;
-    denominator = 50U * HALL_MAGNETS_PER_REV;
+    denominator = HALL_SPEED_CALC_PERIOD_MS * HALL_MAGNETS_PER_REV;
 
     if(denominator == 0U)
     {
@@ -250,4 +200,41 @@ void HallSensor_reset(void)
 
     debugHallRawLevel = 0U;
     debugHallDetected = 0U;
+}
+
+/*********************************************************************************************************************/
+/*------------------------------------------------Private functions--------------------------------------------------*/
+/*********************************************************************************************************************/
+
+static uint8_t HallSensor_readRawLevel(void)
+{
+    IfxPort_State state;
+
+    state = IfxPort_getPinState(HALL_PORT, HALL_PIN_INDEX);
+
+    if(state == IfxPort_State_high)
+    {
+        return 1U;
+    }
+    else
+    {
+        return 0U;
+    }
+}
+
+static uint8_t HallSensor_convertRawToDetected(uint8_t rawLevel)
+{
+    /*
+     * Active Low:
+     * raw 0 -> 자석 감지
+     * raw 1 -> 자석 미감지
+     */
+    return (rawLevel == 0U) ? 1U : 0U;
+
+}
+
+static void HallSensor_updateDebug(uint8_t rawLevel, uint8_t detected)
+{
+    debugHallRawLevel = rawLevel;
+    debugHallDetected = detected;
 }

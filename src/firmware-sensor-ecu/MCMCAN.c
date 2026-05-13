@@ -170,6 +170,9 @@ static void readNode0RxBuffer(IfxCan_RxBufferId rxBufferId);
 
 static void readTofCanNode2Fifo0(void);
 
+static void handleVehicleStateRx(const uint8_t *data, uint8_t length);
+static void handleOtaRequestRx(const uint8_t *data, uint8_t length);
+
 static CanTxResult_t enqueueTxMessage(uint32 id,
                                       const uint8_t *data,
                                       uint8 length,
@@ -401,116 +404,145 @@ void CanIf_onReceive(uint32 id, const uint8_t *data, uint8_t length)
     {
         case CAN_ID_VEHICLE_STATE:
         {
-            VehicleState_Frame_t frame;
-
-            if(length < CAN_DLC_VEHICLE_STATE)
-            {
-                break;
-            }
-
-            memcpy(frame.raw, data, CAN_DLC_VEHICLE_STATE);
-
-            testGearState = frame.fields.gearState;
-
-            if(frame.fields.gearState == GEAR_STATE_D)
-            {
-                testSensorReadEnabled = TRUE;
-            }
-            else
-            {
-                testSensorReadEnabled = FALSE;
-            }
-
+            handleVehicleStateRx(data, length);
             break;
         }
 
         case CAN_ID_OTA_REQUEST:
         {
-            if(length < 1U)
+            handleOtaRequestRx(data, length);
+            break;
+        }
+
+        default:
+        {
+            break;
+        }
+    }
+}
+
+
+/*********************************************************************************************************************/
+/*--------------------------------------------RX handler functions---------------------------------------------------*/
+/*********************************************************************************************************************/
+
+/**
+ * @brief 0x080 VehicleState 수신 처리
+ *
+ * Gear D이면 Sensor ECU 센서값 송신을 허용하고,
+ * 그 외 Gear 상태에서는 센서값 송신을 막는다.
+ */
+static void handleVehicleStateRx(const uint8_t *data, uint8_t length)
+{
+    VehicleState_Frame_t frame;
+
+    if((data == NULL_PTR) || (length < CAN_DLC_VEHICLE_STATE))
+    {
+        return;
+    }
+
+    memcpy(frame.raw, data, CAN_DLC_VEHICLE_STATE);
+
+    testGearState = frame.fields.gearState;
+
+    if(frame.fields.gearState == GEAR_STATE_D)
+    {
+        testSensorReadEnabled = TRUE;
+    }
+    else
+    {
+        testSensorReadEnabled = FALSE;
+    }
+}
+
+
+/**
+ * @brief 0x600 OtaRequest 수신 처리
+ *
+ * 현재는 OTA 요청 payload를 파싱해서 Watch 확인용 변수에 저장한다.
+ */
+static void handleOtaRequestRx(const uint8_t *data, uint8_t length)
+{
+    if((data == NULL_PTR) || (length < 1U))
+    {
+        return;
+    }
+
+    testOtaServiceId = data[0];
+
+    switch(testOtaServiceId)
+    {
+        case OTA_SERVICE_START:
+        {
+            OtaStartRequest_t req;
+
+            if(length < OTA_START_REQUEST_SIZE)
             {
                 break;
             }
 
-            testOtaServiceId = data[0];
+            memcpy(&req, data, OTA_START_REQUEST_SIZE);
 
-            switch(testOtaServiceId)
+            testOtaFirmwareSize  = req.firmwareSize;
+            testOtaFirmwareCrc32 = req.firmwareCrc32;
+
+            break;
+        }
+
+        case OTA_SERVICE_TRANSFER_DATA:
+        {
+            OtaTransferDataRequest_t reqHeader;
+
+            if(length < OTA_TRANSFER_DATA_HEADER_SIZE)
             {
-                case OTA_SERVICE_START:
-                {
-                    OtaStartRequest_t req;
-
-                    if(length < OTA_START_REQUEST_SIZE)
-                    {
-                        break;
-                    }
-
-                    memcpy(&req, data, OTA_START_REQUEST_SIZE);
-
-                    testOtaFirmwareSize  = req.firmwareSize;
-                    testOtaFirmwareCrc32 = req.firmwareCrc32;
-
-                    break;
-                }
-
-                case OTA_SERVICE_TRANSFER_DATA:
-                {
-                    OtaTransferDataRequest_t reqHeader;
-
-                    if(length < OTA_TRANSFER_DATA_HEADER_SIZE)
-                    {
-                        break;
-                    }
-
-                    memcpy(&reqHeader, data, OTA_TRANSFER_DATA_HEADER_SIZE);
-
-                    testOtaBlockSequence = reqHeader.blockSequence;
-                    testOtaDataLength    = reqHeader.dataLength;
-
-                    break;
-                }
-
-                case OTA_SERVICE_TRANSFER_EXIT:
-                {
-                    OtaTransferExitRequest_t req;
-
-                    if(length < OTA_TRANSFER_EXIT_REQUEST_SIZE)
-                    {
-                        break;
-                    }
-
-                    memcpy(&req, data, OTA_TRANSFER_EXIT_REQUEST_SIZE);
-
-                    testOtaTotalCrc32   = req.totalCrc32;
-                    testOtaApplyRequest = req.applyRequest;
-
-                    break;
-                }
-
-                case OTA_SERVICE_RESET:
-                {
-                    OtaResetRequest_t req;
-
-                    if(length < OTA_RESET_REQUEST_SIZE)
-                    {
-                        break;
-                    }
-
-                    memcpy(&req, data, OTA_RESET_REQUEST_SIZE);
-
-                    testOtaResetType = req.resetType;
-
-                    break;
-                }
-
-                default:
-                    break;
+                break;
             }
+
+            memcpy(&reqHeader, data, OTA_TRANSFER_DATA_HEADER_SIZE);
+
+            testOtaBlockSequence = reqHeader.blockSequence;
+            testOtaDataLength    = reqHeader.dataLength;
+
+            break;
+        }
+
+        case OTA_SERVICE_TRANSFER_EXIT:
+        {
+            OtaTransferExitRequest_t req;
+
+            if(length < OTA_TRANSFER_EXIT_REQUEST_SIZE)
+            {
+                break;
+            }
+
+            memcpy(&req, data, OTA_TRANSFER_EXIT_REQUEST_SIZE);
+
+            testOtaTotalCrc32   = req.totalCrc32;
+            testOtaApplyRequest = req.applyRequest;
+
+            break;
+        }
+
+        case OTA_SERVICE_RESET:
+        {
+            OtaResetRequest_t req;
+
+            if(length < OTA_RESET_REQUEST_SIZE)
+            {
+                break;
+            }
+
+            memcpy(&req, data, OTA_RESET_REQUEST_SIZE);
+
+            testOtaResetType = req.resetType;
 
             break;
         }
 
         default:
+        {
             break;
+        }
     }
 }
 

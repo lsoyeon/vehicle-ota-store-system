@@ -7,7 +7,7 @@
  *  - 실제 CAN 송신 및 센서 처리는 main context의 Scheduler_run()에서 수행
  *
  * 주기:
- *  - 1ms : HallSensor pulse count update
+ *  - 1ms : HallSensor D0 pulse count update
  *  - 10ms: 0x200 ImuData, 0x201 TofDistanceData
  *  - 50ms: 0x202 SpeedData
  *********************************************************************************************************************/
@@ -68,9 +68,6 @@ volatile uint32_t mainHallPulseCount = 0U;
 volatile uint16_t mainHallVehicleSpeed = 0U;
 volatile uint32_t mainHallUpdateCount = 0U;
 
-volatile uint16_t mainHallAdcRaw = 0U;
-volatile uint8_t  mainHallDetected = 0U;
-
 /* 주기 송신 Watch 확인용 */
 volatile uint32_t mainTxImuCount = 0U;
 volatile uint32_t mainTxTofCount = 0U;
@@ -94,13 +91,16 @@ extern volatile boolean testSensorReadEnabled;
 /*------------------------------------------------Private prototypes-------------------------------------------------*/
 /*********************************************************************************************************************/
 
-static boolean consume1msFlag(void);
-static boolean consume10msFlag(void);
-static boolean consume50msFlag(void);
+static void    Scheduler_setTaskFlag(volatile boolean *flag, volatile uint32 *overrunCounter);
+static boolean Scheduler_consumeTaskFlag(volatile boolean *flag);
 
 static void task_1ms(void);
 static void task_10ms(void);
 static void task_50ms(void);
+
+static void sendImuData10ms(void);
+static void sendTofDistanceData10ms(void);
+static void sendSpeedData50ms(void);
 
 /*********************************************************************************************************************/
 /*------------------------------------------------ISR Definition-----------------------------------------------------*/
@@ -123,17 +123,8 @@ void stm0IsrHandler(void)
 
     /*
      * 1ms task flag
-     * HallSensor pulse를 놓치지 않기 위해 1ms마다 처리
      */
-    if(s_task1msFlag == FALSE)
-    {
-        s_task1msFlag = TRUE;
-    }
-    else
-    {
-        scheduler1msOverrunCount++;
-    }
-
+    Scheduler_setTaskFlag(&s_task1msFlag, &scheduler1msOverrunCount);
     scheduler1msCount++;
 
     /*
@@ -141,15 +132,7 @@ void stm0IsrHandler(void)
      */
     if((s_tick % TASK_10MS_DIV) == 0U)
     {
-        if(s_task10msFlag == FALSE)
-        {
-            s_task10msFlag = TRUE;
-        }
-        else
-        {
-            scheduler10msOverrunCount++;
-        }
-
+        Scheduler_setTaskFlag(&s_task10msFlag, &scheduler10msOverrunCount);
         scheduler10msCount++;
     }
 
@@ -158,15 +141,7 @@ void stm0IsrHandler(void)
      */
     if((s_tick % TASK_50MS_DIV) == 0U)
     {
-        if(s_task50msFlag == FALSE)
-        {
-            s_task50msFlag = TRUE;
-        }
-        else
-        {
-            scheduler50msOverrunCount++;
-        }
-
+        Scheduler_setTaskFlag(&s_task50msFlag, &scheduler50msOverrunCount);
         scheduler50msCount++;
     }
 }
@@ -214,17 +189,17 @@ void initScheduler(void)
 
 void Scheduler_run(void)
 {
-    if(consume1msFlag() == TRUE)
+    if(Scheduler_consumeTaskFlag(&s_task1msFlag) == TRUE)
     {
         task_1ms();
     }
 
-    if(consume10msFlag() == TRUE)
+    if(Scheduler_consumeTaskFlag(&s_task10msFlag) == TRUE)
     {
         task_10ms();
     }
 
-    if(consume50msFlag() == TRUE)
+    if(Scheduler_consumeTaskFlag(&s_task50msFlag) == TRUE)
     {
         task_50ms();
     }
@@ -239,52 +214,28 @@ uint32 Scheduler_getTick(void)
 /*------------------------------------------------Private functions--------------------------------------------------*/
 /*********************************************************************************************************************/
 
-static boolean consume1msFlag(void)
+static void Scheduler_setTaskFlag(volatile boolean *flag, volatile uint32 *overrunCounter)
 {
-    boolean ret = FALSE;
-    boolean interruptState;
-
-    interruptState = IfxCpu_disableInterrupts();
-
-    if(s_task1msFlag == TRUE)
+    if(*flag == FALSE)
     {
-        s_task1msFlag = FALSE;
-        ret = TRUE;
+        *flag = TRUE;
     }
-
-    IfxCpu_restoreInterrupts(interruptState);
-
-    return ret;
+    else
+    {
+        (*overrunCounter)++;
+    }
 }
 
-static boolean consume10msFlag(void)
+static boolean Scheduler_consumeTaskFlag(volatile boolean *flag)
 {
     boolean ret = FALSE;
     boolean interruptState;
 
     interruptState = IfxCpu_disableInterrupts();
 
-    if(s_task10msFlag == TRUE)
+    if(*flag == TRUE)
     {
-        s_task10msFlag = FALSE;
-        ret = TRUE;
-    }
-
-    IfxCpu_restoreInterrupts(interruptState);
-
-    return ret;
-}
-
-static boolean consume50msFlag(void)
-{
-    boolean ret = FALSE;
-    boolean interruptState;
-
-    interruptState = IfxCpu_disableInterrupts();
-
-    if(s_task50msFlag == TRUE)
-    {
-        s_task50msFlag = FALSE;
+        *flag = FALSE;
         ret = TRUE;
     }
 
@@ -324,11 +275,37 @@ static void task_1ms(void)
  */
 static void task_10ms(void)
 {
-    static uint16_t yawAngle = 0U;
-    static int16_t  yawRate = 10;
+    /*
+     * 인터페이스 정의:
+     * Gear P이면 Sensor ECU는 센서값 송신 X
+     */
+    if(testSensorReadEnabled != TRUE)
+    {
+        return;
+    }
 
-    ImuData_t imuData;
-    TofDistanceData_t tofData;
+    sendImuData10ms();
+    sendTofDistanceData10ms();
+}
+
+/**
+ * @brief 50ms task
+ *
+ * 처리:
+ *  - HallSensor pulse 기반 속도 계산
+ *
+ * 송신:
+ *  - 0x202 SpeedData
+ */
+static void task_50ms(void)
+{
+    /*
+     * 50ms마다 Hall pulse 기반 속도 계산.
+     * Gear P라서 송신하지 않더라도 계산은 계속 해둔다.
+     * 그래야 P 상태에서 쌓인 pulse가 D 전환 순간에 한 번에 반영되는 문제를 줄일 수 있다.
+     */
+    HallSensor_calcSpeed50ms();
+    mainHallVehicleSpeed = HallSensor_getVehicleSpeed();
 
     /*
      * 인터페이스 정의:
@@ -339,10 +316,26 @@ static void task_10ms(void)
         return;
     }
 
-    /******************************************************************************************************************
-     * 0x200 ImuData
-     * 주기: 10ms
-     ******************************************************************************************************************/
+    sendSpeedData50ms();
+}
+
+/*********************************************************************************************************************/
+/*------------------------------------------------Send helper functions----------------------------------------------*/
+/*********************************************************************************************************************/
+
+/**
+ * @brief 0x200 ImuData 송신
+ *
+ * 현재는 테스트용 dummy yaw 값을 송신한다.
+ * 나중에 실제 BNO055 값으로 교체 예정.
+ */
+static void sendImuData10ms(void)
+{
+    static uint16_t yawAngle = 0U;
+    static int16_t  yawRate = 10;
+
+    ImuData_t imuData;
+
     imuData.yawAngle = yawAngle;
     imuData.yawRate  = yawRate;
 
@@ -365,14 +358,18 @@ static void task_10ms(void)
     {
         yawAngle = 0U;
     }
+}
 
-    /******************************************************************************************************************
-     * 0x201 TofDistanceData
-     * 주기: 10ms
-     *
-     * 새 TOF 값이 들어왔을 때만 보내는 게 아니라,
-     * 최신 거리값을 10ms마다 반복 송신한다.
-     ******************************************************************************************************************/
+/**
+ * @brief 0x201 TofDistanceData 송신
+ *
+ * 새 TOF 값이 들어왔을 때만 보내는 게 아니라,
+ * 최신 거리값을 10ms마다 반복 송신한다.
+ */
+static void sendTofDistanceData10ms(void)
+{
+    TofDistanceData_t tofData;
+
     if(TofSensor_hasNewData() == TRUE)
     {
         mainTofUpdateCount++;
@@ -404,37 +401,12 @@ static void task_10ms(void)
 }
 
 /**
- * @brief 50ms task
- *
- * 송신:
- *  - 0x202 SpeedData
+ * @brief 0x202 SpeedData 송신
  */
-static void task_50ms(void)
+static void sendSpeedData50ms(void)
 {
     SpeedData_t speedData;
 
-    /*
-     * 50ms마다 Hall pulse 기반 속도 계산.
-     * Gear P라서 송신하지 않더라도 계산은 계속 해둔다.
-     * 그래야 P 상태에서 쌓인 pulse가 D 전환 순간에 한 번에 반영되는 문제를 줄일 수 있다.
-     */
-    HallSensor_calcSpeed50ms();
-
-    mainHallVehicleSpeed = HallSensor_getVehicleSpeed();
-
-    /*
-     * 인터페이스 정의:
-     * Gear P이면 Sensor ECU는 센서값 송신 X
-     */
-    if(testSensorReadEnabled != TRUE)
-    {
-        return;
-    }
-
-    /******************************************************************************************************************
-     * 0x202 SpeedData
-     * 주기: 50ms
-     ******************************************************************************************************************/
     speedData.vehicleSpeed = mainHallVehicleSpeed;
 
     if(CanIf_sendSpeedData(&speedData) == CAN_TX_OK)
