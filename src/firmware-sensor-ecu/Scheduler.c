@@ -7,9 +7,13 @@
  *  - 실제 CAN 송신 및 센서 처리는 main context의 Scheduler_run()에서 수행
  *
  * 주기:
- *  - 1ms : HallSensor D0 pulse count update
- *  - 10ms: 0x200 ImuData, 0x201 TofDistanceData
- *  - 50ms: 0x202 SpeedData
+ *  - 1ms  : HallSensor D0 pulse count update
+ *  - 10ms : 0x200 ImuData, 0x201 TofDistanceData
+ *  - 100ms: 0x202 SpeedData
+ *
+ * 정책:
+ *  - Sensor ECU의 센서값 송신은 Gear P/D와 무관하게 계속 수행한다.
+ *  - Gear P/D는 OTA 허용 조건 판단에만 사용한다.
  *********************************************************************************************************************/
 
 #include "Scheduler.h"
@@ -17,6 +21,7 @@
 #include "IfxStm.h"
 #include "IfxCpu.h"
 #include "IfxCpu_Irq.h"
+#include "IfxSrc.h"
 
 #include "MCMCAN.h"
 #include "can_type_def.h"
@@ -37,9 +42,9 @@ static IfxStm_CompareConfig s_stmConfig;
  * 이미 flag가 TRUE인데 또 주기가 오면 overrun으로 카운트.
  * 센서값은 밀린 만큼 몰아서 보내는 것보다 최신값을 주기적으로 보내는 게 맞음.
  */
-static volatile boolean s_task1msFlag  = FALSE;
-static volatile boolean s_task10msFlag = FALSE;
-static volatile boolean s_task50msFlag = FALSE;
+static volatile boolean s_task1msFlag   = FALSE;
+static volatile boolean s_task10msFlag  = FALSE;
+static volatile boolean s_task100msFlag = FALSE;
 
 /*********************************************************************************************************************/
 /*------------------------------------------------Debug variables----------------------------------------------------*/
@@ -50,11 +55,11 @@ volatile uint32 schedulerTickCount = 0U;
 
 volatile uint32 scheduler1msCount = 0U;
 volatile uint32 scheduler10msCount = 0U;
-volatile uint32 scheduler50msCount = 0U;
+volatile uint32 scheduler100msCount = 0U;
 
 volatile uint32 scheduler1msOverrunCount = 0U;
 volatile uint32 scheduler10msOverrunCount = 0U;
-volatile uint32 scheduler50msOverrunCount = 0U;
+volatile uint32 scheduler100msOverrunCount = 0U;
 
 /* TOF Watch 확인용 */
 volatile uint16_t mainTofDistanceMm = 0U;
@@ -78,16 +83,6 @@ volatile uint32_t mainTxTofFailCount = 0U;
 volatile uint32_t mainTxSpeedFailCount = 0U;
 
 /*********************************************************************************************************************/
-/*---------------------------------------------External variables----------------------------------------------------*/
-/*********************************************************************************************************************/
-
-/*
- * MCMCAN.c에서 0x080 VehicleState 수신 시 갱신됨.
- * Gear D일 때 TRUE.
- */
-extern volatile boolean testSensorReadEnabled;
-
-/*********************************************************************************************************************/
 /*------------------------------------------------Private prototypes-------------------------------------------------*/
 /*********************************************************************************************************************/
 
@@ -96,11 +91,11 @@ static boolean Scheduler_consumeTaskFlag(volatile boolean *flag);
 
 static void task_1ms(void);
 static void task_10ms(void);
-static void task_50ms(void);
+static void task_100ms(void);
 
 static void sendImuData10ms(void);
 static void sendTofDistanceData10ms(void);
-static void sendSpeedData50ms(void);
+static void sendSpeedData100ms(void);
 
 /*********************************************************************************************************************/
 /*------------------------------------------------ISR Definition-----------------------------------------------------*/
@@ -137,12 +132,12 @@ void stm0IsrHandler(void)
     }
 
     /*
-     * 50ms task flag
+     * 100ms task flag
      */
-    if((s_tick % TASK_50MS_DIV) == 0U)
+    if((s_tick % TASK_100MS_DIV) == 0U)
     {
-        Scheduler_setTaskFlag(&s_task50msFlag, &scheduler50msOverrunCount);
-        scheduler50msCount++;
+        Scheduler_setTaskFlag(&s_task100msFlag, &scheduler100msOverrunCount);
+        scheduler100msCount++;
     }
 }
 
@@ -154,19 +149,37 @@ void initScheduler(void)
 {
     s_tick = 0U;
 
-    s_task1msFlag  = FALSE;
-    s_task10msFlag = FALSE;
-    s_task50msFlag = FALSE;
+    s_task1msFlag   = FALSE;
+    s_task10msFlag  = FALSE;
+    s_task100msFlag = FALSE;
 
     schedulerTickCount = 0U;
 
     scheduler1msCount = 0U;
     scheduler10msCount = 0U;
-    scheduler50msCount = 0U;
+    scheduler100msCount = 0U;
 
     scheduler1msOverrunCount = 0U;
     scheduler10msOverrunCount = 0U;
-    scheduler50msOverrunCount = 0U;
+    scheduler100msOverrunCount = 0U;
+
+    mainTofDistanceMm = 0U;
+    mainTofRaw24 = 0U;
+    mainTofLastCanId = 0U;
+    mainTofValid = FALSE;
+    mainTofUpdateCount = 0U;
+
+    mainHallPulseCount = 0U;
+    mainHallVehicleSpeed = 0U;
+    mainHallUpdateCount = 0U;
+
+    mainTxImuCount = 0U;
+    mainTxTofCount = 0U;
+    mainTxSpeedCount = 0U;
+
+    mainTxImuFailCount = 0U;
+    mainTxTofFailCount = 0U;
+    mainTxSpeedFailCount = 0U;
 
     IfxStm_initCompareConfig(&s_stmConfig);
 
@@ -199,9 +212,9 @@ void Scheduler_run(void)
         task_10ms();
     }
 
-    if(Scheduler_consumeTaskFlag(&s_task50msFlag) == TRUE)
+    if(Scheduler_consumeTaskFlag(&s_task100msFlag) == TRUE)
     {
-        task_50ms();
+        task_100ms();
     }
 }
 
@@ -272,51 +285,36 @@ static void task_1ms(void)
  * 송신:
  *  - 0x200 ImuData
  *  - 0x201 TofDistanceData
+ *
+ * 정책:
+ *  - IMU / TOF 센서값은 Gear P/D와 무관하게 계속 송신한다.
+ *  - ZCU의 AEB 판단을 위해 최신 거리값이 항상 필요하다.
  */
 static void task_10ms(void)
 {
-    /*
-     * 인터페이스 정의:
-     * Gear P이면 Sensor ECU는 센서값 송신 X
-     */
-    if(testSensorReadEnabled != TRUE)
-    {
-        return;
-    }
-
     sendImuData10ms();
     sendTofDistanceData10ms();
 }
 
 /**
- * @brief 50ms task
+ * @brief 100ms task
  *
  * 처리:
- *  - HallSensor pulse 기반 속도 계산
+ *  - HallSensor pulse interval 기반 속도 계산
  *
  * 송신:
  *  - 0x202 SpeedData
+ *
+ * 정책:
+ *  - SpeedData는 Gear P/D와 무관하게 계속 송신한다.
+ *  - ZCU의 AEB 판단을 위해 최신 차량 속도값이 항상 필요하다.
  */
-static void task_50ms(void)
+static void task_100ms(void)
 {
-    /*
-     * 50ms마다 Hall pulse 기반 속도 계산.
-     * Gear P라서 송신하지 않더라도 계산은 계속 해둔다.
-     * 그래야 P 상태에서 쌓인 pulse가 D 전환 순간에 한 번에 반영되는 문제를 줄일 수 있다.
-     */
-    HallSensor_calcSpeed50ms();
+    HallSensor_calcSpeed100ms();
     mainHallVehicleSpeed = HallSensor_getVehicleSpeed();
 
-    /*
-     * 인터페이스 정의:
-     * Gear P이면 Sensor ECU는 센서값 송신 X
-     */
-    if(testSensorReadEnabled != TRUE)
-    {
-        return;
-    }
-
-    sendSpeedData50ms();
+    sendSpeedData100ms();
 }
 
 /*********************************************************************************************************************/
@@ -403,7 +401,7 @@ static void sendTofDistanceData10ms(void)
 /**
  * @brief 0x202 SpeedData 송신
  */
-static void sendSpeedData50ms(void)
+static void sendSpeedData100ms(void)
 {
     SpeedData_t speedData;
 

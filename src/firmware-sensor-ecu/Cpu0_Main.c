@@ -36,8 +36,8 @@ void core0_main(void)
      * Init
      */
     initMcmcan();
-    initScheduler();
     HallSensor_init();
+    initScheduler();
 
     while(1)
     {

@@ -27,6 +27,7 @@
 #include "Ifx_Types.h"
 #include "IfxCpu.h"
 #include "IfxScuWdt.h"
+#include "Ifx_Cfg_Ssw.h"
 
 extern IfxCpu_syncEvent g_cpuSyncEvent;
 

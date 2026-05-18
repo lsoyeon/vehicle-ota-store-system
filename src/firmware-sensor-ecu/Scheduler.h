@@ -6,11 +6,11 @@
 /*
  * 1ms base tick
  * 10ms task = 10 tick
- * 50ms task = 50 tick
+ * 100ms task = 100 tick
  */
 #define SCHEDULER_BASE_MS      1U
 #define TASK_10MS_DIV          10U
-#define TASK_50MS_DIV          50U
+#define TASK_100MS_DIV         100U
 
 #ifndef ISR_PRIORITY_STM
 #define ISR_PRIORITY_STM       10U

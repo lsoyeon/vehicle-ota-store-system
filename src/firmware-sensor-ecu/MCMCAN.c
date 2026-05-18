@@ -20,6 +20,10 @@
  * 중요:
  *  - MODULE_CAN0은 Node0과 Node2가 공유한다.
  *  - 따라서 Node0/Node2의 Message RAM 영역을 반드시 분리해야 한다.
+ *
+ * 변경 사항:
+ *  - Sensor ECU 센서값 송신은 Gear P/D와 무관하게 항상 허용한다.
+ *  - Gear P/D는 OTA 허용 여부 판단에만 사용한다.
  *********************************************************************************************************************/
 
 #include "MCMCAN.h"
@@ -37,25 +41,50 @@ McmcanType g_mcmcan;
    Node0 RX 디버깅용 변수
    ============================================================ */
 
-volatile uint32_t testLastRxId = 0;
+volatile uint32_t testLastRxId = 0U;
 
+/*
+ * 0x080 VehicleState로 받은 현재 Gear 상태.
+ * Sensor ECU에서는 센서 송신 제한용이 아니라 OTA 허용 조건 판단용으로만 사용한다.
+ */
 volatile uint8_t testGearState = GEAR_STATE_P;
 
 /*
- * Sensor ECU: Gear P -> 센서값 읽기 X
- * Gear D일 때만 센서 송신 허용
+ * 기존 Scheduler.c 호환용 변수.
+ *
+ * 예전 구조:
+ *   Gear D일 때만 TRUE
+ *   Gear P이면 FALSE
+ *
+ * 현재 구조:
+ *   센서값은 Gear P/D와 무관하게 항상 송신해야 하므로 항상 TRUE 유지.
+ *
+ * 나중에 Scheduler.c에서 이 변수를 완전히 제거해도 된다.
  */
-volatile boolean testSensorReadEnabled = FALSE;
+volatile boolean testSensorReadEnabled = TRUE;
+
+/*
+ * OTA 허용 여부.
+ *
+ * 정책:
+ *   Gear P일 때만 OTA 허용
+ *   Gear D일 때는 OTA 비허용
+ *
+ * 아직 실제 OTA 처리 로직에서 사용하지 않더라도,
+ * 향후 handleOtaRequestRx() 또는 OTA manager에서 이 값을 보고 판단하면 된다.
+ */
+volatile boolean testOtaAllowed = TRUE;
+
 
 /* OTA Request 확인용 */
-volatile uint8_t  testOtaServiceId      = 0;
-volatile uint32_t testOtaFirmwareSize   = 0;
-volatile uint32_t testOtaFirmwareCrc32  = 0;
-volatile uint16_t testOtaBlockSequence  = 0;
-volatile uint16_t testOtaDataLength     = 0;
-volatile uint32_t testOtaTotalCrc32     = 0;
-volatile uint8_t  testOtaApplyRequest   = 0;
-volatile uint8_t  testOtaResetType      = 0;
+volatile uint8_t  testOtaServiceId      = 0U;
+volatile uint32_t testOtaFirmwareSize   = 0U;
+volatile uint32_t testOtaFirmwareCrc32  = 0U;
+volatile uint16_t testOtaBlockSequence  = 0U;
+volatile uint16_t testOtaDataLength     = 0U;
+volatile uint32_t testOtaTotalCrc32     = 0U;
+volatile uint8_t  testOtaApplyRequest   = 0U;
+volatile uint8_t  testOtaResetType      = 0U;
 
 
 /* ============================================================
@@ -262,6 +291,14 @@ void tofCanNode2RxIsrHandler(void)
  */
 void initMcmcan(void)
 {
+    /*
+     * 센서값 송신은 Gear와 무관하게 항상 허용.
+     * OTA는 기본적으로 P 상태에서만 허용하는 정책.
+     */
+    testGearState = GEAR_STATE_P;
+    testSensorReadEnabled = TRUE;
+    testOtaAllowed = TRUE;
+
     initCanTransceiver();
     initCanModule();
 
@@ -429,8 +466,8 @@ void CanIf_onReceive(uint32 id, const uint8_t *data, uint8_t length)
 /**
  * @brief 0x080 VehicleState 수신 처리
  *
- * Gear D이면 Sensor ECU 센서값 송신을 허용하고,
- * 그 외 Gear 상태에서는 센서값 송신을 막는다.
+ * Sensor ECU 센서 측정/송신은 Gear P/D와 무관하게 계속 수행한다.
+ * Gear 상태는 OTA 허용 조건 판단에만 사용한다.
  */
 static void handleVehicleStateRx(const uint8_t *data, uint8_t length)
 {
@@ -445,13 +482,22 @@ static void handleVehicleStateRx(const uint8_t *data, uint8_t length)
 
     testGearState = frame.fields.gearState;
 
-    if(frame.fields.gearState == GEAR_STATE_D)
+    /*
+     * 센서값 송신은 Gear P/D와 무관하게 항상 허용.
+     * 기존 Scheduler.c 호환을 위해 TRUE로 유지한다.
+     */
+    testSensorReadEnabled = TRUE;
+
+    /*
+     * OTA는 P단에서만 허용.
+     */
+    if(frame.fields.gearState == GEAR_STATE_P)
     {
-        testSensorReadEnabled = TRUE;
+        testOtaAllowed = TRUE;
     }
     else
     {
-        testSensorReadEnabled = FALSE;
+        testOtaAllowed = FALSE;
     }
 }
 
@@ -460,6 +506,7 @@ static void handleVehicleStateRx(const uint8_t *data, uint8_t length)
  * @brief 0x600 OtaRequest 수신 처리
  *
  * 현재는 OTA 요청 payload를 파싱해서 Watch 확인용 변수에 저장한다.
+ * 실제 OTA 적용 여부는 추후 testOtaAllowed를 기준으로 판단하면 된다.
  */
 static void handleOtaRequestRx(const uint8_t *data, uint8_t length)
 {
@@ -485,6 +532,19 @@ static void handleOtaRequestRx(const uint8_t *data, uint8_t length)
 
             testOtaFirmwareSize  = req.firmwareSize;
             testOtaFirmwareCrc32 = req.firmwareCrc32;
+
+            /*
+             * 추후 실제 OTA 로직 연결 시:
+             *
+             * if(testOtaAllowed == TRUE)
+             * {
+             *     OTA 시작 허용
+             * }
+             * else
+             * {
+             *     OTA 거부 응답
+             * }
+             */
 
             break;
         }

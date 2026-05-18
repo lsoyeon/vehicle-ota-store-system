@@ -39,7 +39,7 @@
 /* Sensor ECU -> ZCU */
 #define CAN_ID_IMU_DATA               0x200U  /* ImuData           | Classical CAN | 10ms  */
 #define CAN_ID_TOF_DISTANCE_DATA      0x201U  /* TofDistanceData   | Classical CAN | 10ms  */
-#define CAN_ID_SPEED_DATA             0x202U  /* SpeedData         | Classical CAN | 50ms  */
+#define CAN_ID_SPEED_DATA             0x202U  /* SpeedData         | Classical CAN | 100ms */
 
 /* ZCU <-> Sensor ECU OTA */
 #define CAN_ID_OTA_REQUEST            0x600U  /* OtaRequest        | CAN FD + CAN TP | Event / MultiFrame */
