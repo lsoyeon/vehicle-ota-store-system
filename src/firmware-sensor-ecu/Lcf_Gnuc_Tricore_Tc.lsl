@@ -1,6 +1,6 @@
 /**********************************************************************************************************************
  * \file Lcf_Gnuc_Tricore_Tc.lsl
- * \brief Linker command file for Tasking compiler.
+ * \brief Linker command file for Gnuc compiler.
  * \copyright Copyright (C) Infineon Technologies AG 2019
  * 
  * Use of this file is subject to the terms of use agreed between (i) you or the company in which ordinary course of 
@@ -25,6 +25,7 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
  * IN THE SOFTWARE.
  *********************************************************************************************************************/
+
 /* Default linker script, for normal executables */
 OUTPUT_FORMAT("elf32-tricore")
 OUTPUT_ARCH(tricore)

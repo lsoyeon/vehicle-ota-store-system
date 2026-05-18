@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<launchConfiguration type="com.rt.hightec.agent.launcher.launchConfigurationType">
+    <stringAttribute key="ACC_HW" value="DAS JDS AURIX LITE KIT V2.0 (TC375) LK7XRM2F"/>
+    <booleanAttribute key="ENABLE_AGENTLOG" value="false"/>
+    <booleanAttribute key="ENABLE_FLASHING" value="true"/>
+    <booleanAttribute key="ENABLE_STOPPING" value="true"/>
+    <stringAttribute key="EXECUTABLE_PATH" value="${workspace_loc}/Sensor_ECU/TriCore Debug (TASKING)/Sensor_ECU.elf"/>
+    <stringAttribute key="STOP_FUNCTION" value="core0_main"/>
+    <stringAttribute key="SVD" value="C:/Infineon/AURIX-Studio-1.10.28/build_system/bundled-artefacts-repo/svd/tc37xpd/1.1-2/device.svd"/>
+    <stringAttribute key="org.eclipse.cdt.launch.PROJECT_ATTR" value="Sensor_ECU"/>
+    <listAttribute key="org.eclipse.debug.core.MAPPED_RESOURCE_PATHS">
+        <listEntry value="/Sensor_ECU"/>
+    </listAttribute>
+    <listAttribute key="org.eclipse.debug.core.MAPPED_RESOURCE_TYPES">
+        <listEntry value="4"/>
+    </listAttribute>
+    <stringAttribute key="org.eclipse.debug.ui.ATTR_LOCATION" value="/Sensor_ECU/Sensor_ECU TriCore Debug (TASKING).launch"/>
+    <stringAttribute key="org.eclipse.debug.ui.ATTR_PROJECT_NAME" value="Sensor_ECU"/>
+    <booleanAttribute key="org.eclipse.debug.ui.ATTR_SHARED" value="true"/>
+    <stringAttribute key="org.eclipse.tcf.debug.MemoryMap" value="[{&quot;FileName&quot;:&quot;C:/Users/USER/OTA_Project/Sensor_ECU/TriCore Debug (TASKING)/Sensor_ECU.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK7XRM2F/Core 2: CPU2 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;4836bf58-7dbc-4486-984d-0b4dbe2e0344&quot;},{&quot;FileName&quot;:&quot;C:/Users/USER/OTA_Project/Sensor_ECU/TriCore Debug (TASKING)/Sensor_ECU.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK7XRM2F/Core 2: CPU2 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;2fe7f29f-0606-4428-81df-bd52a4ee01c2&quot;},{&quot;FileName&quot;:&quot;C:/Users/USER/OTA_Project/Sensor_ECU/TriCore Debug (TASKING)/Sensor_ECU.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK7XRM2F/Core 2: CPU2 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;699d1fe1-c23b-4509-9b89-42d3d527698d&quot;},{&quot;FileName&quot;:&quot;C:/Users/USER/OTA_Project/Sensor_ECU/TriCore Debug (TASKING)/Sensor_ECU.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK7XRM2F/Core 0: CPU0 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;e210992d-3ba0-456a-acba-f31d60fd0a9d&quot;},{&quot;FileName&quot;:&quot;C:/Users/USER/OTA_Project/Sensor_ECU/TriCore Debug (TASKING)/Sensor_ECU.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK7XRM2F/Core 2: CPU2 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;3ca9df40-dd63-4699-9aa7-fb35938bbc65&quot;},{&quot;FileName&quot;:&quot;C:/Users/USER/OTA_Project/Sensor_ECU/TriCore Debug (TASKING)/Sensor_ECU.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK7XRM2F/Core 0: CPU0 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;f551009f-dd97-469c-84ac-12fbf194406a&quot;},{&quot;FileName&quot;:&quot;C:/Users/USER/OTA_Project/Sensor_ECU/TriCore Debug (TASKING)/Sensor_ECU.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK7XRM2F/Core 2: CPU2 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;1ba271c2-01b3-4b87-bb5c-4ab4f3472135&quot;},{&quot;FileName&quot;:&quot;C:/Users/USER/OTA_Project/Sensor_ECU/TriCore Debug (TASKING)/Sensor_ECU.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK7XRM2F/Core 0: CPU0 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;8beaca46-9aab-4772-963a-a3286f665068&quot;},{&quot;FileName&quot;:&quot;C:/Users/USER/OTA_Project/Sensor_ECU/TriCore Debug (TASKING)/Sensor_ECU.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK7XRM2F/Core 1: CPU1 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;0b9b2f79-36f1-45c1-aaa0-5c47b3cf7965&quot;},{&quot;FileName&quot;:&quot;C:/Users/USER/OTA_Project/Sensor_ECU/TriCore Debug (TASKING)/Sensor_ECU.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK7XRM2F/Core 2: CPU2 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;80bb82e4-a19e-4600-9235-129649b2bf19&quot;},{&quot;FileName&quot;:&quot;C:/Users/USER/OTA_Project/Sensor_ECU/TriCore Debug (TASKING)/Sensor_ECU.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK7XRM2F/Core 0: CPU0 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;7c93bf09-1268-4536-b9dd-4d9c6848da2f&quot;},{&quot;FileName&quot;:&quot;C:/Users/USER/OTA_Project/Sensor_ECU/TriCore Debug (TASKING)/Sensor_ECU.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK7XRM2F/Core 1: CPU1 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;de139f6f-e0db-4685-a289-ffac429d6328&quot;}]"/>
+    <stringAttribute key="org.eclipse.tcf.debug.PeerID" value="TCP:127.0.0.1:1534"/>
+    <stringAttribute key="org.eclipse.tcf.debug.ProjectName" value="Sensor_ECU"/>
+    <booleanAttribute key="org.eclipse.tcf.debug.RunLocalAgent" value="false"/>
+    <booleanAttribute key="org.eclipse.tcf.debug.RunLocalServer" value="false"/>
+    <booleanAttribute key="org.eclipse.tcf.debug.UseLocalAgent" value="false"/>
+    <stringAttribute key="org.eclipse.tcf.debug.executable_name" value="${workspace_loc}/Sensor_ECU/TriCore Debug (TASKING)/Sensor_ECU.elf"/>
+    <stringAttribute key="sessionID" value="61499776-b148-4762-bece-b462146ed7af"/>
+</launchConfiguration>
