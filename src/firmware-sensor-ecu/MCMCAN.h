@@ -29,6 +29,7 @@
 
 
 #define CAN_TX_RETRY_COUNT    1000000U
+
 /* ============================================================
    Interrupt Priority
    ============================================================ */
@@ -117,7 +118,7 @@ typedef struct
  * ECU별 MCMCAN.c에서 구현 내용이 달라짐.
  *
  * ZCU:
- *  - RX Filter: 0x200, 0x201, 0x202, 0x601
+ *  - RX Filter: 0x201, 0x202, 0x601
  *
  * Motor ECU:
  *  - RX Filter: 0x080, 0x100
@@ -167,8 +168,9 @@ void CanIf_onReceive(uint32 id, const uint8_t *data, uint8_t length);
    ============================================================ */
 
 /*
- * 이 함수들은 공용 헤더에 선언해도 됨.
- * 단, 실제 구현은 ZCU용 MCMCAN.c에만 둔다.
+ * 실제 구현:
+ *  - ZCU용 MCMCAN.c: 정상 구현
+ *  - Sensor ECU / Motor ECU: 필요 없으면 CAN_TX_ERROR stub 가능
  */
 
 CanTxResult_t CanIf_sendVehicleState(const VehicleState_t *msg);
@@ -180,7 +182,15 @@ CanTxResult_t CanIf_sendVehicleControlCmd(const VehicleControlCmd_t *msg);
    필요한 ECU에서만 사용
    ============================================================ */
 
-CanTxResult_t CanIf_sendImuData(const ImuData_t *msg);
+/*
+ * IMU 센서는 현재 프로젝트에서 사용하지 않으므로
+ * CanIf_sendImuData()는 제거한다.
+ *
+ * Sensor ECU:
+ *  - 0x201 TofDistanceData
+ *  - 0x202 SpeedData
+ */
+
 CanTxResult_t CanIf_sendTofDistanceData(const TofDistanceData_t *msg);
 CanTxResult_t CanIf_sendSpeedData(const SpeedData_t *msg);
 
@@ -188,6 +198,14 @@ CanTxResult_t CanIf_sendSpeedData(const SpeedData_t *msg);
 /* ============================================================
    OTA 송수신용 Helper API
    ============================================================ */
+
+/*
+ * ZCU:
+ *  - CanIf_sendOtaRequest() 사용
+ *
+ * Sensor ECU:
+ *  - CanIf_sendOtaResponse() 사용
+ */
 
 CanTxResult_t CanIf_sendOtaRequest(const uint8_t *payload, uint16_t length);
 CanTxResult_t CanIf_sendOtaResponse(const uint8_t *payload, uint16_t length);

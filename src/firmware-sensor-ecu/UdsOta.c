@@ -1,0 +1,639 @@
+/**********************************************************************************************************************
+ * \file UdsOta.c
+ * \brief Sensor ECU UDS-style OTA Service Layer over CAN FD
+ *
+ * 담당 범위:
+ *  - CAN FD 0x600 UDS Request payload 해석
+ *  - UDS Positive / Negative Response 생성
+ *  - Download / TransferData / TransferExit / RoutineControl / Reset 상태 관리
+ *
+ *********************************************************************************************************************/
+
+#include "UdsOta.h"
+#include "MCMCAN.h"
+#include "FlashOta.h"
+
+#include <string.h>
+
+/* ============================================================
+   Internal state
+   ============================================================ */
+
+static UdsOta_DebugInfo_t g_udsOtaDebug;
+static boolean g_programmingAllowed = TRUE;
+
+/* ============================================================
+   Private prototypes
+   ============================================================ */
+
+static void sendPositiveResponse(uint8_t requestSid, const uint8_t *payload, uint8_t payloadLength);
+static void sendNegativeResponse(uint8_t requestSid, uint8_t nrc);
+
+static uint16_t readU16Le(const uint8_t *p);
+static uint32_t readU32Le(const uint8_t *p);
+static void writeU16Le(uint8_t *p, uint16_t value);
+static void writeU32Le(uint8_t *p, uint32_t value);
+
+static void handleDiagnosticSessionControl(const uint8_t *payload, uint8_t length);
+static void handleRequestDownload(const uint8_t *payload, uint8_t length);
+static void handleTransferData(const uint8_t *payload, uint8_t length);
+static void handleRequestTransferExit(const uint8_t *payload, uint8_t length);
+static void handleRoutineControl(const uint8_t *payload, uint8_t length);
+static void handleEcuReset(const uint8_t *payload, uint8_t length);
+
+/*
+ * Target hook
+ * 나중에 팀원이 구현한 Flash/CRC/Jump 함수로 이 함수 내부만 교체하면 됨.
+ */
+static boolean Target_BeginDownload(uint32_t memoryAddress, uint32_t memorySize);
+static boolean Target_WriteBlock(uint16_t blockIndex, const uint8_t *data, uint16_t length);
+static boolean Target_RequestTransferExit(void);
+static boolean Target_CheckCrc32(uint32_t expectedCrc32, uint32_t *calculatedCrc32);
+static boolean Target_EcuReset(uint8_t resetType);
+
+/* ============================================================
+   Public API
+   ============================================================ */
+
+void UdsOta_init(void)
+{
+    UdsOta_reset();
+    FlashOta_Init();
+    g_programmingAllowed = TRUE;
+}
+
+void UdsOta_reset(void)
+{
+    memset(&g_udsOtaDebug, 0, sizeof(g_udsOtaDebug));
+
+    g_udsOtaDebug.state = UDS_OTA_STATE_IDLE;
+    g_udsOtaDebug.lastErrorDetail = 0xFFFFFFFFU;
+
+    g_udsOtaDebug.expectedBlockIndex = 0U;
+    g_udsOtaDebug.expectedBlockSequenceCounter = 0x01U;
+}
+
+void UdsOta_onRequest(const uint8_t *payload, uint8_t length)
+{
+    uint8_t sid;
+
+    if ((payload == NULL_PTR) || (length == 0U))
+    {
+        return;
+    }
+
+    sid = payload[0];
+
+    g_udsOtaDebug.requestCount++;
+    g_udsOtaDebug.lastRequestSid = sid;
+    g_udsOtaDebug.lastRxLength = length;
+
+    switch (sid)
+    {
+        case UDS_SID_DIAGNOSTIC_SESSION_CONTROL:
+        {
+            handleDiagnosticSessionControl(payload, length);
+            break;
+        }
+
+        case UDS_SID_REQUEST_DOWNLOAD:
+        {
+            handleRequestDownload(payload, length);
+            break;
+        }
+
+        case UDS_SID_TRANSFER_DATA:
+        {
+            handleTransferData(payload, length);
+            break;
+        }
+
+        case UDS_SID_REQUEST_TRANSFER_EXIT:
+        {
+            handleRequestTransferExit(payload, length);
+            break;
+        }
+
+        case UDS_SID_ROUTINE_CONTROL:
+        {
+            handleRoutineControl(payload, length);
+            break;
+        }
+
+        case UDS_SID_ECU_RESET:
+        {
+            handleEcuReset(payload, length);
+            break;
+        }
+
+        default:
+        {
+            sendNegativeResponse(sid, UDS_NRC_SERVICE_NOT_SUPPORTED);
+            break;
+        }
+    }
+}
+
+UdsOta_State_t UdsOta_getState(void)
+{
+    return g_udsOtaDebug.state;
+}
+
+void UdsOta_getDebugInfo(UdsOta_DebugInfo_t *info)
+{
+    if (info != NULL_PTR)
+    {
+        memcpy(info, &g_udsOtaDebug, sizeof(UdsOta_DebugInfo_t));
+    }
+}
+
+void UdsOta_setProgrammingAllowed(boolean allowed)
+{
+    g_programmingAllowed = allowed;
+}
+
+boolean UdsOta_isProgrammingAllowed(void)
+{
+    return g_programmingAllowed;
+}
+
+boolean UdsOta_isDownloadInProgress(void)
+{
+    return ((g_udsOtaDebug.state == UDS_OTA_STATE_DOWNLOAD_REQUESTED) ||
+            (g_udsOtaDebug.state == UDS_OTA_STATE_TRANSFERRING));
+}
+
+boolean UdsOta_isCrcVerified(void)
+{
+    return (g_udsOtaDebug.state == UDS_OTA_STATE_CRC_VERIFIED) ? TRUE : FALSE;
+}
+
+/* ============================================================
+   UDS response helpers
+   ============================================================ */
+
+static void sendPositiveResponse(uint8_t requestSid, const uint8_t *payload, uint8_t payloadLength)
+{
+    uint8_t response[CANFD_MAX_DLC];
+
+    memset(response, 0, sizeof(response));
+
+    response[0] = (uint8_t)(requestSid + UDS_POSITIVE_RESPONSE_OFFSET);
+
+    if ((payload != NULL_PTR) && (payloadLength > 0U))
+    {
+        if (payloadLength > (CANFD_MAX_DLC - 1U))
+        {
+            payloadLength = CANFD_MAX_DLC - 1U;
+        }
+
+        memcpy(&response[1], payload, payloadLength);
+    }
+
+    g_udsOtaDebug.positiveResponseCount++;
+    g_udsOtaDebug.lastResponseSid = response[0];
+
+    (void)CanIf_sendOtaResponse(response, CANFD_MAX_DLC);
+}
+
+static void sendNegativeResponse(uint8_t requestSid, uint8_t nrc)
+{
+    uint8_t response[CANFD_MAX_DLC];
+
+    memset(response, 0, sizeof(response));
+
+    response[0] = UDS_SID_NEGATIVE_RESPONSE;
+    response[1] = requestSid;
+    response[2] = nrc;
+
+    g_udsOtaDebug.negativeResponseCount++;
+    g_udsOtaDebug.lastResponseSid = response[0];
+    g_udsOtaDebug.lastNrc = nrc;
+    g_udsOtaDebug.state = UDS_OTA_STATE_ERROR;
+
+    (void)CanIf_sendOtaResponse(response, CANFD_MAX_DLC);
+}
+
+/* ============================================================
+   Utility
+   ============================================================ */
+
+static uint16_t readU16Le(const uint8_t *p)
+{
+    return ((uint16_t)p[0]) |
+           ((uint16_t)p[1] << 8);
+}
+
+static uint32_t readU32Le(const uint8_t *p)
+{
+    return ((uint32_t)p[0]) |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static void writeU16Le(uint8_t *p, uint16_t value)
+{
+    p[0] = (uint8_t)(value & 0xFFU);
+    p[1] = (uint8_t)((value >> 8) & 0xFFU);
+}
+
+static void writeU32Le(uint8_t *p, uint32_t value)
+{
+    p[0] = (uint8_t)(value & 0xFFU);
+    p[1] = (uint8_t)((value >> 8) & 0xFFU);
+    p[2] = (uint8_t)((value >> 16) & 0xFFU);
+    p[3] = (uint8_t)((value >> 24) & 0xFFU);
+}
+
+/* ============================================================
+   UDS handlers
+   ============================================================ */
+
+static void handleDiagnosticSessionControl(const uint8_t *payload, uint8_t length)
+{
+    uint8_t responsePayload[1];
+
+    g_udsOtaDebug.diagnosticSessionCount++;
+
+    if (length < UDS_REQ_LEN_DIAGNOSTIC_SESSION_CONTROL)
+    {
+        sendNegativeResponse(UDS_SID_DIAGNOSTIC_SESSION_CONTROL,
+                             UDS_NRC_INCORRECT_MESSAGE_LENGTH_OR_FORMAT);
+        return;
+    }
+
+    if (payload[1] != UDS_SESSION_PROGRAMMING)
+    {
+        sendNegativeResponse(UDS_SID_DIAGNOSTIC_SESSION_CONTROL,
+                             UDS_NRC_REQUEST_OUT_OF_RANGE);
+        return;
+    }
+
+    if (g_programmingAllowed == FALSE)
+    {
+        sendNegativeResponse(UDS_SID_DIAGNOSTIC_SESSION_CONTROL,
+                             UDS_NRC_CONDITIONS_NOT_CORRECT);
+        return;
+    }
+
+    g_udsOtaDebug.state = UDS_OTA_STATE_PROGRAMMING_SESSION;
+
+    responsePayload[0] = UDS_SESSION_PROGRAMMING;
+
+    sendPositiveResponse(UDS_SID_DIAGNOSTIC_SESSION_CONTROL,
+                         responsePayload,
+                         1U);
+}
+
+static void handleRequestDownload(const uint8_t *payload, uint8_t length)
+{
+    uint32_t memoryAddress;
+    uint32_t memorySize;
+    uint8_t responsePayload[3];
+
+    g_udsOtaDebug.requestDownloadCount++;
+
+    /*
+     * Simplified RequestDownload:
+     * B0      0x34
+     * B1      DataFormatIdentifier = 0x00
+     * B2      AddressAndLengthFormatIdentifier = 0x44
+     * B3~B6   MemoryAddress, little endian
+     * B7~B10  MemorySize, little endian
+     */
+    if (g_udsOtaDebug.state != UDS_OTA_STATE_PROGRAMMING_SESSION)
+    {
+        sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
+                             UDS_NRC_CONDITIONS_NOT_CORRECT);
+        return;
+    }
+
+    if (length < UDS_REQ_LEN_REQUEST_DOWNLOAD)
+    {
+        sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
+                             UDS_NRC_INCORRECT_MESSAGE_LENGTH_OR_FORMAT);
+        return;
+    }
+
+    if ((payload[1] != UDS_DOWNLOAD_DATA_FORMAT_ID) ||
+        (payload[2] != UDS_DOWNLOAD_ADDR_LEN_FORMAT))
+    {
+        sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
+                             UDS_NRC_REQUEST_OUT_OF_RANGE);
+        return;
+    }
+
+    memoryAddress = readU32Le(&payload[3]);
+    memorySize = readU32Le(&payload[7]);
+
+    if ((memoryAddress != UDS_OTA_APP_START_ADDR) ||
+        (memorySize == 0U) ||
+        (memorySize > UDS_OTA_MAX_IMAGE_SIZE))
+    {
+        sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
+                             UDS_NRC_REQUEST_OUT_OF_RANGE);
+        return;
+    }
+
+    if (Target_BeginDownload(memoryAddress, memorySize) == FALSE)
+    {
+        sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
+                             UDS_NRC_GENERAL_PROGRAMMING_FAILURE);
+        return;
+    }
+
+    g_udsOtaDebug.state = UDS_OTA_STATE_DOWNLOAD_REQUESTED;
+    g_udsOtaDebug.memoryAddress = memoryAddress;
+    g_udsOtaDebug.firmwareSize = memorySize;
+    g_udsOtaDebug.receivedBytes = 0U;
+    g_udsOtaDebug.expectedBlockIndex = 0U;
+    g_udsOtaDebug.lastBlockIndex = 0U;
+    g_udsOtaDebug.expectedBlockSequenceCounter = 0x01U;
+    g_udsOtaDebug.lastBlockSequenceCounter = 0U;
+    g_udsOtaDebug.expectedCrc32 = 0U;
+    g_udsOtaDebug.calculatedCrc32 = 0U;
+
+    /*
+     * Positive Response 0x74:
+     * B1 = 0x20
+     * B2~B3 = MaxNumberOfBlockLength = 32
+     */
+    responsePayload[0] = 0x20U;
+    writeU16Le(&responsePayload[1], UDS_MAX_BLOCK_LENGTH);
+
+    sendPositiveResponse(UDS_SID_REQUEST_DOWNLOAD,
+                         responsePayload,
+                         3U);
+}
+
+static void handleTransferData(const uint8_t *payload, uint8_t length)
+{
+    uint8_t blockSequenceCounter;
+    uint16_t blockIndex;
+    uint16_t dataLength;
+    uint32_t remaining;
+    const uint8_t *firmwareData;
+    uint8_t responsePayload[1];
+
+    g_udsOtaDebug.transferDataCount++;
+
+    /*
+     * Simplified TransferData:
+     * B0    0x36
+     * B1    BlockSequenceCounter, 1 byte
+     * B2~   Firmware data
+     */
+    if ((g_udsOtaDebug.state != UDS_OTA_STATE_DOWNLOAD_REQUESTED) &&
+        (g_udsOtaDebug.state != UDS_OTA_STATE_TRANSFERRING))
+    {
+        sendNegativeResponse(UDS_SID_TRANSFER_DATA,
+                             UDS_NRC_CONDITIONS_NOT_CORRECT);
+        return;
+    }
+
+    if (length < UDS_REQ_LEN_TRANSFER_DATA_MIN)
+    {
+        sendNegativeResponse(UDS_SID_TRANSFER_DATA,
+                             UDS_NRC_INCORRECT_MESSAGE_LENGTH_OR_FORMAT);
+        return;
+    }
+
+    blockSequenceCounter = payload[1];
+
+    if (blockSequenceCounter != g_udsOtaDebug.expectedBlockSequenceCounter)
+    {
+        sendNegativeResponse(UDS_SID_TRANSFER_DATA,
+                             UDS_NRC_WRONG_BLOCK_SEQUENCE_COUNTER);
+        return;
+    }
+
+    if (g_udsOtaDebug.receivedBytes >= g_udsOtaDebug.firmwareSize)
+    {
+        sendNegativeResponse(UDS_SID_TRANSFER_DATA,
+                             UDS_NRC_REQUEST_OUT_OF_RANGE);
+        return;
+    }
+
+    remaining = g_udsOtaDebug.firmwareSize - g_udsOtaDebug.receivedBytes;
+
+    if (remaining >= UDS_OTA_TRANSFER_DATA_SIZE)
+    {
+        dataLength = UDS_OTA_TRANSFER_DATA_SIZE;
+    }
+    else
+    {
+        dataLength = (uint16_t)remaining;
+    }
+
+    if (length < (uint8_t)(2U + dataLength))
+    {
+        sendNegativeResponse(UDS_SID_TRANSFER_DATA,
+                             UDS_NRC_INCORRECT_MESSAGE_LENGTH_OR_FORMAT);
+        return;
+    }
+
+    blockIndex = g_udsOtaDebug.expectedBlockIndex;
+    firmwareData = &payload[2];
+
+    if (Target_WriteBlock(blockIndex, firmwareData, dataLength) == FALSE)
+    {
+        sendNegativeResponse(UDS_SID_TRANSFER_DATA,
+                             UDS_NRC_GENERAL_PROGRAMMING_FAILURE);
+        return;
+    }
+
+    g_udsOtaDebug.state = UDS_OTA_STATE_TRANSFERRING;
+    g_udsOtaDebug.lastBlockIndex = blockIndex;
+    g_udsOtaDebug.lastBlockSequenceCounter = blockSequenceCounter;
+    g_udsOtaDebug.receivedBytes += dataLength;
+
+    g_udsOtaDebug.expectedBlockIndex++;
+    g_udsOtaDebug.expectedBlockSequenceCounter++;
+
+    /*
+     * uint8_t라 0xFF 다음 0x00으로 자연 wrap.
+     */
+
+    responsePayload[0] = blockSequenceCounter;
+
+    sendPositiveResponse(UDS_SID_TRANSFER_DATA,
+                         responsePayload,
+                         1U);
+}
+
+static void handleRequestTransferExit(const uint8_t *payload, uint8_t length)
+{
+    (void)payload;
+
+    g_udsOtaDebug.requestTransferExitCount++;
+
+    if (length < UDS_REQ_LEN_REQUEST_TRANSFER_EXIT)
+    {
+        sendNegativeResponse(UDS_SID_REQUEST_TRANSFER_EXIT,
+                             UDS_NRC_INCORRECT_MESSAGE_LENGTH_OR_FORMAT);
+        return;
+    }
+
+    if ((g_udsOtaDebug.state != UDS_OTA_STATE_TRANSFERRING) ||
+        (g_udsOtaDebug.receivedBytes != g_udsOtaDebug.firmwareSize))
+    {
+        sendNegativeResponse(UDS_SID_REQUEST_TRANSFER_EXIT,
+                             UDS_NRC_CONDITIONS_NOT_CORRECT);
+        return;
+    }
+
+    if (Target_RequestTransferExit() == FALSE)
+    {
+        sendNegativeResponse(UDS_SID_REQUEST_TRANSFER_EXIT,
+                             UDS_NRC_GENERAL_PROGRAMMING_FAILURE);
+        return;
+    }
+
+    g_udsOtaDebug.state = UDS_OTA_STATE_TRANSFER_EXIT_DONE;
+
+    sendPositiveResponse(UDS_SID_REQUEST_TRANSFER_EXIT,
+                         NULL_PTR,
+                         0U);
+}
+
+static void handleRoutineControl(const uint8_t *payload, uint8_t length)
+{
+    uint8_t routineControlType;
+    uint16_t routineId;
+    uint32_t expectedCrc32;
+    uint32_t calculatedCrc32 = 0U;
+    uint8_t responsePayload[7];
+
+    g_udsOtaDebug.routineControlCount++;
+
+    /*
+     * B0      0x31
+     * B1      RoutineControlType = 0x01
+     * B2~B3   RoutineIdentifier = 0x0202
+     * B4~B7   Expected CRC32
+     */
+    if (length < UDS_REQ_LEN_ROUTINE_CONTROL_CHECK_CRC32)
+    {
+        sendNegativeResponse(UDS_SID_ROUTINE_CONTROL,
+                             UDS_NRC_INCORRECT_MESSAGE_LENGTH_OR_FORMAT);
+        return;
+    }
+
+    if (g_udsOtaDebug.state != UDS_OTA_STATE_TRANSFER_EXIT_DONE)
+    {
+        sendNegativeResponse(UDS_SID_ROUTINE_CONTROL,
+                             UDS_NRC_CONDITIONS_NOT_CORRECT);
+        return;
+    }
+
+    routineControlType = payload[1];
+    routineId = readU16Le(&payload[2]);
+    expectedCrc32 = readU32Le(&payload[4]);
+
+    if ((routineControlType != UDS_ROUTINE_START) ||
+        (routineId != UDS_ROUTINE_ID_CHECK_CRC32))
+    {
+        sendNegativeResponse(UDS_SID_ROUTINE_CONTROL,
+                             UDS_NRC_REQUEST_OUT_OF_RANGE);
+        return;
+    }
+
+    if (Target_CheckCrc32(expectedCrc32, &calculatedCrc32) == FALSE)
+    {
+        g_udsOtaDebug.expectedCrc32 = expectedCrc32;
+        g_udsOtaDebug.calculatedCrc32 = calculatedCrc32;
+
+        sendNegativeResponse(UDS_SID_ROUTINE_CONTROL,
+                             UDS_NRC_GENERAL_PROGRAMMING_FAILURE);
+        return;
+    }
+
+    g_udsOtaDebug.state = UDS_OTA_STATE_CRC_VERIFIED;
+    g_udsOtaDebug.expectedCrc32 = expectedCrc32;
+    g_udsOtaDebug.calculatedCrc32 = calculatedCrc32;
+
+    responsePayload[0] = routineControlType;
+    writeU16Le(&responsePayload[1], routineId);
+    writeU32Le(&responsePayload[3], calculatedCrc32);
+
+    sendPositiveResponse(UDS_SID_ROUTINE_CONTROL,
+                         responsePayload,
+                         7U);
+}
+
+static void handleEcuReset(const uint8_t *payload, uint8_t length)
+{
+    uint8_t resetType;
+    uint8_t responsePayload[1];
+
+    g_udsOtaDebug.ecuResetCount++;
+
+    if (length < UDS_REQ_LEN_ECU_RESET)
+    {
+        sendNegativeResponse(UDS_SID_ECU_RESET,
+                             UDS_NRC_INCORRECT_MESSAGE_LENGTH_OR_FORMAT);
+        return;
+    }
+
+    if (g_udsOtaDebug.state != UDS_OTA_STATE_CRC_VERIFIED)
+    {
+        sendNegativeResponse(UDS_SID_ECU_RESET,
+                             UDS_NRC_CONDITIONS_NOT_CORRECT);
+        return;
+    }
+
+    resetType = payload[1];
+
+    if (resetType != UDS_RESET_JUMP_TO_APP)
+    {
+        sendNegativeResponse(UDS_SID_ECU_RESET,
+                             UDS_NRC_REQUEST_OUT_OF_RANGE);
+        return;
+    }
+
+    responsePayload[0] = resetType;
+
+    sendPositiveResponse(UDS_SID_ECU_RESET,
+                         responsePayload,
+                         1U);
+
+    g_udsOtaDebug.state = UDS_OTA_STATE_RESET_REQUESTED;
+
+    (void)Target_EcuReset(resetType);
+}
+
+/* ============================================================
+   Target hook functions
+   ============================================================ */
+
+/*
+ * 아래 함수들은 현재 CAN/UDS 계층 테스트용 placeholder.
+ * Flash erase/write/CRC/jump 함수를 완성하면,
+ * 여기 내부를 실제 함수 호출로 교체하면 된다.
+ */
+
+static boolean Target_BeginDownload(uint32_t memoryAddress, uint32_t memorySize)
+{
+    return FlashOta_BeginDownload(memoryAddress, memorySize);
+}
+
+static boolean Target_WriteBlock(uint16_t blockIndex, const uint8_t *data, uint16_t length)
+{
+    return FlashOta_WriteBlock(blockIndex, data, length);
+}
+
+static boolean Target_RequestTransferExit(void)
+{
+    return FlashOta_EndTransfer();
+}
+
+static boolean Target_CheckCrc32(uint32_t expectedCrc32, uint32_t *calculatedCrc32)
+{
+    return FlashOta_CheckCrc32(expectedCrc32, calculatedCrc32);
+}
+
+static boolean Target_EcuReset(uint8_t resetType)
+{
+    return FlashOta_RequestJumpToApp(resetType);
+}

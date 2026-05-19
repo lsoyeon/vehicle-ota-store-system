@@ -7,13 +7,14 @@
  *  - 실제 CAN 송신 및 센서 처리는 main context의 Scheduler_run()에서 수행
  *
  * 주기:
- *  - 1ms  : HallSensor D0 pulse count update
- *  - 10ms : 0x200 ImuData, 0x201 TofDistanceData
- *  - 100ms: 0x202 SpeedData
+ *  - 1ms   : HallSensor D0 pulse count update
+ *  - 10ms  : 0x201 TofDistanceData, FEATURE_TOF_SENSOR == 1U일 때만
+ *  - 100ms : 0x202 SpeedData
  *
  * 정책:
  *  - Sensor ECU의 센서값 송신은 Gear P/D와 무관하게 계속 수행한다.
  *  - Gear P/D는 OTA 허용 조건 판단에만 사용한다.
+ *  - IMU 센서는 현재 프로젝트에서 사용하지 않는다.
  *********************************************************************************************************************/
 
 #include "Scheduler.h"
@@ -25,14 +26,21 @@
 
 #include "MCMCAN.h"
 #include "can_type_def.h"
-#include "TofSensor.h"
+#include "FeatureConfig.h"
 #include "HallSensor.h"
+
+#if (FEATURE_TOF_SENSOR == 1U)
+#include "TofSensor.h"
+#endif
 
 #include <stdint.h>
 
 /*********************************************************************************************************************/
 /*-------------------------------------------------Static variables--------------------------------------------------*/
 /*********************************************************************************************************************/
+
+#define USE_FIXED_SPEED_FOR_AEB_TEST    1U
+#define TEST_FIXED_SPEED_KMH_X100       630U
 
 static uint32               s_tick = 0U;
 static IfxStm_CompareConfig s_stmConfig;
@@ -74,11 +82,9 @@ volatile uint16_t mainHallVehicleSpeed = 0U;
 volatile uint32_t mainHallUpdateCount = 0U;
 
 /* 주기 송신 Watch 확인용 */
-volatile uint32_t mainTxImuCount = 0U;
 volatile uint32_t mainTxTofCount = 0U;
 volatile uint32_t mainTxSpeedCount = 0U;
 
-volatile uint32_t mainTxImuFailCount = 0U;
 volatile uint32_t mainTxTofFailCount = 0U;
 volatile uint32_t mainTxSpeedFailCount = 0U;
 
@@ -93,8 +99,10 @@ static void task_1ms(void);
 static void task_10ms(void);
 static void task_100ms(void);
 
-static void sendImuData10ms(void);
+#if (FEATURE_TOF_SENSOR == 1U)
 static void sendTofDistanceData10ms(void);
+#endif
+
 static void sendSpeedData100ms(void);
 
 /*********************************************************************************************************************/
@@ -173,11 +181,9 @@ void initScheduler(void)
     mainHallVehicleSpeed = 0U;
     mainHallUpdateCount = 0U;
 
-    mainTxImuCount = 0U;
     mainTxTofCount = 0U;
     mainTxSpeedCount = 0U;
 
-    mainTxImuFailCount = 0U;
     mainTxTofFailCount = 0U;
     mainTxSpeedFailCount = 0U;
 
@@ -283,17 +289,23 @@ static void task_1ms(void)
  * @brief 10ms task
  *
  * 송신:
- *  - 0x200 ImuData
- *  - 0x201 TofDistanceData
+ *  - FEATURE_TOF_SENSOR == 1U일 때만 0x201 TofDistanceData
  *
  * 정책:
- *  - IMU / TOF 센서값은 Gear P/D와 무관하게 계속 송신한다.
- *  - ZCU의 AEB 판단을 위해 최신 거리값이 항상 필요하다.
+ *  - TOF 기능이 있는 Application에서는 거리값을 10ms마다 송신한다.
+ *  - TOF 기능이 없는 Application에서는 TOF를 읽지도 않고 0x201도 송신하지 않는다.
  */
 static void task_10ms(void)
 {
-    sendImuData10ms();
+#if (FEATURE_TOF_SENSOR == 1U)
     sendTofDistanceData10ms();
+#else
+    /*
+     * TOF OFF 버전:
+     *  - TOF 센서 읽기 없음
+     *  - 0x201 TofDistanceData 송신 없음
+     */
+#endif
 }
 
 /**
@@ -307,12 +319,30 @@ static void task_10ms(void)
  *
  * 정책:
  *  - SpeedData는 Gear P/D와 무관하게 계속 송신한다.
- *  - ZCU의 AEB 판단을 위해 최신 차량 속도값이 항상 필요하다.
+ *  - ZCU의 AEB 판단을 위해 최신 차량 속도값이 필요하다.
  */
 static void task_100ms(void)
 {
+#if (USE_FIXED_SPEED_FOR_AEB_TEST == 1U)
+
+    /*
+     * AEB 테스트용:
+     * 홀센서 위치가 정확하지 않으므로 속도를 고정값으로 송신한다.
+     *
+     * 단위:
+     * 630 = 6.30 km/h
+     */
+    mainHallVehicleSpeed = TEST_FIXED_SPEED_KMH_X100;
+
+#else
+
+    /*
+     * 실제 홀센서 기반 속도 계산
+     */
     HallSensor_calcSpeed100ms();
     mainHallVehicleSpeed = HallSensor_getVehicleSpeed();
+
+#endif
 
     sendSpeedData100ms();
 }
@@ -321,42 +351,7 @@ static void task_100ms(void)
 /*------------------------------------------------Send helper functions----------------------------------------------*/
 /*********************************************************************************************************************/
 
-/**
- * @brief 0x200 ImuData 송신
- *
- * 현재는 테스트용 dummy yaw 값을 송신한다.
- * 나중에 실제 BNO055 값으로 교체 예정.
- */
-static void sendImuData10ms(void)
-{
-    static uint16_t yawAngle = 0U;
-    static int16_t  yawRate = 10;
-
-    ImuData_t imuData;
-
-    imuData.yawAngle = yawAngle;
-    imuData.yawRate  = yawRate;
-
-    if(CanIf_sendImuData(&imuData) == CAN_TX_OK)
-    {
-        mainTxImuCount++;
-    }
-    else
-    {
-        mainTxImuFailCount++;
-    }
-
-    /*
-     * 현재는 테스트용 dummy yaw.
-     * 나중에 실제 IMU 값으로 교체.
-     */
-    yawAngle += 10U;
-
-    if(yawAngle >= 36000U)
-    {
-        yawAngle = 0U;
-    }
-}
+#if (FEATURE_TOF_SENSOR == 1U)
 
 /**
  * @brief 0x201 TofDistanceData 송신
@@ -397,6 +392,8 @@ static void sendTofDistanceData10ms(void)
         mainTxTofFailCount++;
     }
 }
+
+#endif /* FEATURE_TOF_SENSOR */
 
 /**
  * @brief 0x202 SpeedData 송신

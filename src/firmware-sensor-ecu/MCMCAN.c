@@ -1,6 +1,6 @@
 /**********************************************************************************************************************
  * \file MCMCAN.c
- * \brief Sensor ECU MCMCAN driver - Node0(ZCU) + Node2(TOF CAN), separated Message RAM version
+ * \brief Sensor ECU MCMCAN driver - Node0(ZCU) + optional Node2(TOF CAN), separated Message RAM version
  *
  * Sensor ECU 역할:
  *  - Node0 RX:
@@ -8,27 +8,36 @@
  *      0x600 OtaRequest    -> RxBuffer1
  *
  *  - Node0 TX:
- *      0x200 ImuData
- *      0x201 TofDistanceData
+ *      0x201 TofDistanceData, FEATURE_TOF_SENSOR == 1U일 때만 Scheduler에서 송신
  *      0x202 SpeedData
  *      0x601 OtaResponse
  *
  *  - Node2 RX:
+ *      FEATURE_TOF_SENSOR == 1U일 때만 사용
  *      TOF Sensor CAN frame -> RX FIFO0
  *      수신 frame은 TofSensor_onCanFrame(id, data, length)로 전달
  *
  * 중요:
  *  - MODULE_CAN0은 Node0과 Node2가 공유한다.
  *  - 따라서 Node0/Node2의 Message RAM 영역을 반드시 분리해야 한다.
+ *  - FEATURE_TOF_SENSOR == 0U이면 Node2 TOF CAN은 초기화하지 않는다.
  *
  * 변경 사항:
+ *  - IMU 센서를 사용하지 않으므로 0x200 ImuData 송신 기능 제거.
  *  - Sensor ECU 센서값 송신은 Gear P/D와 무관하게 항상 허용한다.
  *  - Gear P/D는 OTA 허용 여부 판단에만 사용한다.
  *********************************************************************************************************************/
 
 #include "MCMCAN.h"
 #include "IfxCpu.h"
+#include "FeatureConfig.h"
+#include "UdsOta.h"
+
+#if (FEATURE_TOF_SENSOR == 1U)
 #include "TofSensor.h"
+#endif
+
+#include <string.h>
 
 /*********************************************************************************************************************/
 /*-------------------------------------------------Global variables--------------------------------------------------*/
@@ -52,10 +61,6 @@ volatile uint8_t testGearState = GEAR_STATE_P;
 /*
  * 기존 Scheduler.c 호환용 변수.
  *
- * 예전 구조:
- *   Gear D일 때만 TRUE
- *   Gear P이면 FALSE
- *
  * 현재 구조:
  *   센서값은 Gear P/D와 무관하게 항상 송신해야 하므로 항상 TRUE 유지.
  *
@@ -69,9 +74,6 @@ volatile boolean testSensorReadEnabled = TRUE;
  * 정책:
  *   Gear P일 때만 OTA 허용
  *   Gear D일 때는 OTA 비허용
- *
- * 아직 실제 OTA 처리 로직에서 사용하지 않더라도,
- * 향후 handleOtaRequestRx() 또는 OTA manager에서 이 값을 보고 판단하면 된다.
  */
 volatile boolean testOtaAllowed = TRUE;
 
@@ -125,6 +127,8 @@ volatile uint32_t testTxBusyCount   = 0U;
 volatile uint32_t testTxDropCount   = 0U;
 
 
+#if (FEATURE_TOF_SENSOR == 1U)
+
 /* ============================================================
    Node2 TOF CAN 설정
    ============================================================ */
@@ -145,6 +149,8 @@ volatile uint8_t  testTofCanRxLength = 0U;
 volatile uint32_t testTofCanRxCount  = 0U;
 volatile uint8_t  testTofRawBytes[8] = {0};
 
+#endif /* FEATURE_TOF_SENSOR */
+
 
 /* ============================================================
    Node0 pin mapping
@@ -161,6 +167,8 @@ static const IfxCan_Can_Pins g_mcmcanNode0Pins =
 };
 
 
+#if (FEATURE_TOF_SENSOR == 1U)
+
 /* ============================================================
    Node2 pin mapping
    TOF 센서 CAN 수신용
@@ -175,6 +183,8 @@ static const IfxCan_Can_Pins g_tofCanNode2Pins =
     IfxPort_PadDriver_cmosAutomotiveSpeed1
 };
 
+#endif /* FEATURE_TOF_SENSOR */
+
 
 /*********************************************************************************************************************/
 /*------------------------------------------------Private prototypes-------------------------------------------------*/
@@ -186,21 +196,27 @@ static void initCanModule(void);
 static void initCanNode0(void);
 static void initSensorNode0RxFilters(void);
 
+#if (FEATURE_TOF_SENSOR == 1U)
 static void initTofCanNode2(void);
 static void initTofCanNode2Filter(void);
+#endif
 
 static void setNode0MessageRamLayout(void);
+
+#if (FEATURE_TOF_SENSOR == 1U)
 static void setNode2MessageRamLayout(void);
+#endif
 
 static void setNode0StandardFilter(uint8 filterNumber, uint32 canId, IfxCan_RxBufferId rxBufferId);
 
 static void readNode0UpdatedRxBuffers(void);
 static void readNode0RxBuffer(IfxCan_RxBufferId rxBufferId);
 
+#if (FEATURE_TOF_SENSOR == 1U)
 static void readTofCanNode2Fifo0(void);
+#endif
 
 static void handleVehicleStateRx(const uint8_t *data, uint8_t length);
-static void handleOtaRequestRx(const uint8_t *data, uint8_t length);
 
 static CanTxResult_t enqueueTxMessage(uint32 id,
                                       const uint8_t *data,
@@ -224,7 +240,10 @@ static void copyWordsToBytes(uint8_t *byteBuffer, const uint32 *wordBuffer, uint
 
 IFX_INTERRUPT(canIsrTxHandler, 0, ISR_PRIORITY_CAN_TX);
 IFX_INTERRUPT(canIsrRxHandler, 0, ISR_PRIORITY_CAN_RX);
+
+#if (FEATURE_TOF_SENSOR == 1U)
 IFX_INTERRUPT(tofCanNode2RxIsrHandler, 0, ISR_PRIORITY_TOF_CAN_RX);
+#endif
 
 
 /**
@@ -260,6 +279,8 @@ void canIsrRxHandler(void)
 }
 
 
+#if (FEATURE_TOF_SENSOR == 1U)
+
 /**
  * @brief Node2 TOF CAN RX interrupt handler
  *
@@ -274,6 +295,8 @@ void tofCanNode2RxIsrHandler(void)
     readTofCanNode2Fifo0();
 }
 
+#endif /* FEATURE_TOF_SENSOR */
+
 
 /*********************************************************************************************************************/
 /*------------------------------------------------Public functions---------------------------------------------------*/
@@ -285,9 +308,8 @@ void tofCanNode2RxIsrHandler(void)
  * 순서:
  *  1. CAN transceiver 활성화
  *  2. CAN module 초기화
- *  3. TOF sensor parser 초기화
- *  4. Node0 초기화 + Node0 filter 설정
- *  5. Node2 초기화 + Node2 filter 설정
+ *  3. Node0 초기화 + Node0 filter 설정
+ *  4. FEATURE_TOF_SENSOR == 1U이면 TOF parser 초기화 + Node2 초기화
  */
 void initMcmcan(void)
 {
@@ -299,10 +321,11 @@ void initMcmcan(void)
     testSensorReadEnabled = TRUE;
     testOtaAllowed = TRUE;
 
+    UdsOta_init();
+    UdsOta_setProgrammingAllowed(testOtaAllowed);
+
     initCanTransceiver();
     initCanModule();
-
-    TofSensor_init();
 
     /*
      * Node0: ZCU 통신용
@@ -310,19 +333,18 @@ void initMcmcan(void)
     initCanNode0();
     initSensorNode0RxFilters();
 
+#if (FEATURE_TOF_SENSOR == 1U)
+    /*
+     * TOF 기능이 있는 App에서만 TOF Sensor parser와 Node2 CAN을 초기화한다.
+     */
+    TofSensor_init();
+
     /*
      * Node2: TOF 센서 CAN 수신용
      */
     initTofCanNode2();
     initTofCanNode2Filter();
-
-    /*
-     * 중요:
-     * 만약 여기까지 했는데 Node0 0x080 수신이 또 죽으면,
-     * 아래 줄을 임시로 한 번 더 호출해서 필터 충돌 여부를 확인한다.
-     *
-     * initSensorNode0RxFilters();
-     */
+#endif
 }
 
 
@@ -355,27 +377,9 @@ CanTxResult_t CanIf_sendFd(uint32 id, const uint8_t *data, uint8_t length)
 
 
 /**
- * @brief Sensor ECU 송신: 0x200 ImuData
- */
-CanTxResult_t CanIf_sendImuData(const ImuData_t *msg)
-{
-    ImuData_Frame_t frame;
-
-    if(msg == NULL_PTR)
-    {
-        return CAN_TX_ERROR;
-    }
-
-    frame.fields = *msg;
-
-    return CanIf_sendClassic(CAN_ID_IMU_DATA,
-                             frame.raw,
-                             CAN_DLC_IMU_DATA);
-}
-
-
-/**
  * @brief Sensor ECU 송신: 0x201 TofDistanceData
+ *
+ * FEATURE_TOF_SENSOR == 1U인 Application에서만 Scheduler가 호출한다.
  */
 CanTxResult_t CanIf_sendTofDistanceData(const TofDistanceData_t *msg)
 {
@@ -447,7 +451,12 @@ void CanIf_onReceive(uint32 id, const uint8_t *data, uint8_t length)
 
         case CAN_ID_OTA_REQUEST:
         {
-            handleOtaRequestRx(data, length);
+            if ((data != NULL_PTR) && (length > 0U))
+            {
+                testOtaServiceId = data[0];
+            }
+
+            UdsOta_onRequest(data, length);
             break;
         }
 
@@ -499,111 +508,8 @@ static void handleVehicleStateRx(const uint8_t *data, uint8_t length)
     {
         testOtaAllowed = FALSE;
     }
-}
 
-
-/**
- * @brief 0x600 OtaRequest 수신 처리
- *
- * 현재는 OTA 요청 payload를 파싱해서 Watch 확인용 변수에 저장한다.
- * 실제 OTA 적용 여부는 추후 testOtaAllowed를 기준으로 판단하면 된다.
- */
-static void handleOtaRequestRx(const uint8_t *data, uint8_t length)
-{
-    if((data == NULL_PTR) || (length < 1U))
-    {
-        return;
-    }
-
-    testOtaServiceId = data[0];
-
-    switch(testOtaServiceId)
-    {
-        case OTA_SERVICE_START:
-        {
-            OtaStartRequest_t req;
-
-            if(length < OTA_START_REQUEST_SIZE)
-            {
-                break;
-            }
-
-            memcpy(&req, data, OTA_START_REQUEST_SIZE);
-
-            testOtaFirmwareSize  = req.firmwareSize;
-            testOtaFirmwareCrc32 = req.firmwareCrc32;
-
-            /*
-             * 추후 실제 OTA 로직 연결 시:
-             *
-             * if(testOtaAllowed == TRUE)
-             * {
-             *     OTA 시작 허용
-             * }
-             * else
-             * {
-             *     OTA 거부 응답
-             * }
-             */
-
-            break;
-        }
-
-        case OTA_SERVICE_TRANSFER_DATA:
-        {
-            OtaTransferDataRequest_t reqHeader;
-
-            if(length < OTA_TRANSFER_DATA_HEADER_SIZE)
-            {
-                break;
-            }
-
-            memcpy(&reqHeader, data, OTA_TRANSFER_DATA_HEADER_SIZE);
-
-            testOtaBlockSequence = reqHeader.blockSequence;
-            testOtaDataLength    = reqHeader.dataLength;
-
-            break;
-        }
-
-        case OTA_SERVICE_TRANSFER_EXIT:
-        {
-            OtaTransferExitRequest_t req;
-
-            if(length < OTA_TRANSFER_EXIT_REQUEST_SIZE)
-            {
-                break;
-            }
-
-            memcpy(&req, data, OTA_TRANSFER_EXIT_REQUEST_SIZE);
-
-            testOtaTotalCrc32   = req.totalCrc32;
-            testOtaApplyRequest = req.applyRequest;
-
-            break;
-        }
-
-        case OTA_SERVICE_RESET:
-        {
-            OtaResetRequest_t req;
-
-            if(length < OTA_RESET_REQUEST_SIZE)
-            {
-                break;
-            }
-
-            memcpy(&req, data, OTA_RESET_REQUEST_SIZE);
-
-            testOtaResetType = req.resetType;
-
-            break;
-        }
-
-        default:
-        {
-            break;
-        }
-    }
+    UdsOta_setProgrammingAllowed(testOtaAllowed);
 }
 
 
@@ -767,6 +673,8 @@ static void setNode0StandardFilter(uint8 filterNumber, uint32 canId, IfxCan_RxBu
 }
 
 
+#if (FEATURE_TOF_SENSOR == 1U)
+
 /**
  * @brief TOF 센서용 CAN Node2 초기화
  *
@@ -855,6 +763,8 @@ static void initTofCanNode2Filter(void)
                                  &g_tofCanFilter);
 }
 
+#endif /* FEATURE_TOF_SENSOR */
+
 
 /**
  * @brief Node0 Message RAM layout
@@ -889,6 +799,8 @@ static void setNode0MessageRamLayout(void)
 }
 
 
+#if (FEATURE_TOF_SENSOR == 1U)
+
 /**
  * @brief Node2 Message RAM layout
  *
@@ -919,6 +831,8 @@ static void setNode2MessageRamLayout(void)
     g_tofCanNode2Config.messageRAM.txEventFifoStartAddress = 0x680U;
     g_tofCanNode2Config.messageRAM.txBuffersStartAddress   = 0x6C0U;
 }
+
+#endif /* FEATURE_TOF_SENSOR */
 
 
 /**
@@ -973,6 +887,8 @@ static void readNode0RxBuffer(IfxCan_RxBufferId rxBufferId)
 }
 
 
+#if (FEATURE_TOF_SENSOR == 1U)
+
 /**
  * @brief TOF Node2 RX FIFO0에서 메시지 1개 읽기
  */
@@ -1026,6 +942,8 @@ static void readTofCanNode2Fifo0(void)
                          rxBytes,
                          length);
 }
+
+#endif /* FEATURE_TOF_SENSOR */
 
 
 /**

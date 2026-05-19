@@ -10,6 +10,7 @@
 #include "MCMCAN.h"
 #include "Scheduler.h"
 #include "HallSensor.h"
+#include "FlashOta.h"
 
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
@@ -50,7 +51,7 @@ void core0_main(void)
          * 를 실행한다.
          */
         Scheduler_run();
-
+        FlashOta_Service();
         /*
          * 나중에 background task 추가 가능:
          * - OTA state machine
