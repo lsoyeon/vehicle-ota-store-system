@@ -1,0 +1,50 @@
+# AURIX Development Studio / Eclipse workspace files
+.metadata/
+.recommenders/
+RemoteSystemsTempFiles/
+*.launch
+
+# Build output directories
+Debug/
+Release/
+TriCore Debug*/
+TriCore Release*/
+
+# Compiled objects and dependency files
+*.o
+*.obj
+*.d
+*.dep
+*.lst
+*.su
+
+# Firmware/linker build artifacts
+*.elf
+*.hex
+*.bin
+*.srec
+*.mot
+*.map
+*.mdf
+*.opt
+
+# Generated build system files
+makefile
+Makefile
+sources.mk
+subdir.mk
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
