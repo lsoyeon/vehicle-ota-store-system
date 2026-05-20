@@ -3,6 +3,7 @@
 .recommenders/
 RemoteSystemsTempFiles/
 *.launch
+.vscode/
 
 # Build output directories
 Debug/
