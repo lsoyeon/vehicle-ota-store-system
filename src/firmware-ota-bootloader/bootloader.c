@@ -30,6 +30,7 @@
 /*-----------------------------------------------------Includes------------------------------------------------------*/
 #include "bootloader.h"
 #include "ota_flash.h"
+#include "sota_ucb.h"
 /*********************************************************************************************************************/
 
 /*********************************************************************************************************************/
@@ -51,44 +52,67 @@ typedef void (*AppFunc)(void);
 
 /*********************************************************************************************************************/
 /*---------------------------------------------Function Implementations----------------------------------------------*/
+
 static void Bootloader_JumpToApp(uint32 appAddr)
 {
-    /* TC375 점프: 앱의 시작 벡터 주소로 점프 */
-    AppFunc app = (AppFunc)(*(volatile uint32 *)(appAddr));
+    AppFunc app = (AppFunc)appAddr;
     app();
 }
 
 void Bootloader_Main(void)
 {
-    /* 1. DFLASH 플래그 읽기 */
+    //OTA flag 확인
     uint32 flag = *(volatile uint32 *)OTA_FLAG_ADDR;
+    //SOTA 초기화 여부 확인
+    if (!SOTA_IsInitialized())
+    {
+        SOTA_InitialSetup();
+        while (1) {}
+    }
 
+    //OTA 플래그가 설정된 경우 → OTA 검증 → 그룹 스왑 → 새 FW 부팅
+    
     if (flag == OTA_FLAG_MAGIC)
     {
-        /* 2. Bank B 메타데이터 읽기 (플래그 옆에 저장) */
         uint32 fwSize     = *(volatile uint32 *)(OTA_FLAG_ADDR + 8);
         uint32 expectedCRC = *(volatile uint32 *)(OTA_FLAG_ADDR + 16);
+        
+        boolean isGroupBActive = SOTA_IsGroupBActive();
 
+        uint32 targetStart = isGroupBActive ? BANK_A_START : BANK_B_START;
+        uint32 targetSize  = isGroupBActive ? BANK_A_SIZE  : BANK_B_SIZE;
 
-        /* 3. CRC 검증 */
-        if (OTA_Flash_VerifyCRC(BANK_B_START, fwSize, expectedCRC))
+        // 검증 성공 시 Group B로 스왑, 실패 시 Group A로 스왑 
+        if ((fwSize > 0) &&
+            (fwSize <= targetSize) &&
+            OTA_Flash_VerifyCRC(targetStart, fwSize, expectedCRC))
         {
-            /* 4. 검증 성공 → 플래그 클리어 → Bank B 실행 */
             OTA_Flash_ClearFlag();
-            Bootloader_JumpToApp(BANK_B_START);
+
+            if (isGroupBActive)
+                SOTA_SwapToGroupA();
+            else
+                SOTA_SwapToGroupB();
+
+            Bootloader_JumpToApp(APP_START_ADDR);
         }
+        // 검증 실패 시 → 플래그 클리어 → Group A로 스왑 (복구 시나리오) → 새 FW 부팅
         else
         {
-            /* 5. 검증 실패 → 롤백 → Bank A 실행 */
             OTA_Flash_ClearFlag();
+
+            if (SOTA_IsGroupBActive())
+                SOTA_SwapToGroupA();
+            else
+                    SOTA_SwapToGroupB();
+                    
             Bootloader_JumpToApp(APP_START_ADDR);
         }
     }
+    //OTA 플래그가 설정되지 않은 경우 → 정상 부팅
     else
     {
-        /* 6. 플래그 없음 → 정상 부팅 → Bank A 실행 */
         Bootloader_JumpToApp(APP_START_ADDR);
     }
 }
-
 /*********************************************************************************************************************/

@@ -1,5 +1,5 @@
 /**********************************************************************************************************************
- * \file Cpu0_Main.c
+ * \file UART_VCOM.h
  * \copyright Copyright (C) Infineon Technologies AG 2019
  *
  * Use of this file is subject to the terms of use agreed between (i) you or the company in which ordinary course of
@@ -24,51 +24,14 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  *********************************************************************************************************************/
-#include "Ifx_Types.h"
-#include "IfxCpu.h"
-#include "IfxScuWdt.h"
-#include "Ifx_Cfg_Ssw.h"
-#include "ota_flash.h"
-#include <stdio.h>
-#include "IfxAsclin_Asc.h"
-#include "UART_VCOM.h"
 
-extern IfxAsclin_Asc g_ascPrint;
+#ifndef UART_VCOM_H_
+#define UART_VCOM_H_
 
-int _write(int fd, char *buf, int len)
-{
-    Ifx_SizeT count = len;
-    IfxAsclin_Asc_write(&g_ascPrint, buf, &count, TIME_INFINITE);
-    return count;
-}
+/*********************************************************************************************************************/
+/*------------------------------------------------Function Prototypes------------------------------------------------*/
+/*********************************************************************************************************************/
 
-// IfxCpu_syncEvent g_cpuSyncEvent = 0;
+void init_UART(void);           /* Initialization function  */
 
-IFX_ALIGN(4) IfxCpu_syncEvent cpuSyncEvent = 0;
-extern void Bootloader_Main(void);
-
-void core1_main(void) { while(1) {} }
-void core2_main(void) { while(1) {} }
-
-void core0_main(void)
-{
-    //IfxCpu_enableInterrupts();
-
-    /* !!WATCHDOG0 AND SAFETY WATCHDOG ARE DISABLED HERE!!
-     * Enable the watchdogs and service them periodically if it is required
-     */
-    IfxScuWdt_disableCpuWatchdog(IfxScuWdt_getCpuWatchdogPassword());
-    IfxScuWdt_disableSafetyWatchdog(IfxScuWdt_getSafetyWatchdogPassword());
-
-    /* Wait for CPU sync event */
-    IfxCpu_emitEvent(&cpuSyncEvent);
-    IfxCpu_waitEvent(&cpuSyncEvent, 1);
-
-    init_UART();
-    printf("Core0 Main\n");
-
-    Bootloader_Main();
-    while(1)
-    {
-    }
-}
+#endif /* UART_VCOM_H_ */
