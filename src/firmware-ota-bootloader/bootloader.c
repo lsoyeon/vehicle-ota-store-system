@@ -28,6 +28,10 @@
 
 /*********************************************************************************************************************/
 /*-----------------------------------------------------Includes------------------------------------------------------*/
+/*********************************************************************************************************************/
+#include "Ifx_Types.h"
+#include "IfxCpu.h"
+#include "Ifx_Ssw.h"
 #include "bootloader.h"
 #include "ota_flash.h"
 #include "sota_ucb.h"
@@ -55,8 +59,13 @@ typedef void (*AppFunc)(void);
 
 static void Bootloader_JumpToApp(uint32 appAddr)
 {
-    AppFunc app = (AppFunc)appAddr;
-    app();
+    AppFunc app = (AppFunc)TO_FLASH_ADDR(appAddr);
+
+    IfxCpu_disableInterrupts();
+    Ifx_Ssw_DSYNC();
+    Ifx_Ssw_ISYNC();
+
+    Ifx_Ssw_jumpToFunction(app);
 }
 
 void Bootloader_Main(void)
@@ -79,9 +88,11 @@ void Bootloader_Main(void)
         
         boolean isGroupBActive = SOTA_IsGroupBActive();
 
-        uint32 targetStart = isGroupBActive ? BANK_A_START : BANK_B_START;
-        uint32 targetSize  = isGroupBActive ? BANK_A_SIZE  : BANK_B_SIZE;
-
+        /* With SOTA swap enabled, the active application is always visible at
+         * BANK_A_START. Verify the inactive logical update slot.
+         */
+        uint32 targetStart = BANK_B_START;
+        uint32 targetSize  = BANK_B_SIZE;
         // 검증 성공 시 Group B로 스왑, 실패 시 Group A로 스왑 
         if ((fwSize > 0) &&
             (fwSize <= targetSize) &&
@@ -93,8 +104,9 @@ void Bootloader_Main(void)
                 SOTA_SwapToGroupA();
             else
                 SOTA_SwapToGroupB();
-
-            Bootloader_JumpToApp(APP_START_ADDR);
+            IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
+            while (1) {}
+            //Bootloader_JumpToApp(APP_START_ADDR);
         }
         // 검증 실패 시 → 플래그 클리어 → Group A로 스왑 (복구 시나리오) → 새 FW 부팅
         else
