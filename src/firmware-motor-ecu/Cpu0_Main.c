@@ -1,98 +1,116 @@
+/**********************************************************************************************************************
+ * \file Cpu0_Main.c
+ * \brief Motor ECU Main - CAN RX -> Vehicle UART TX
+ *
+ * 역할:
+ *  - CAN 0x100 VehicleControlCmd 수신
+ *  - driveCmd / steeringCmd / stopCmd를 차량 UART 프레임으로 변환
+ *  - ASCLIN0 TX(P15.2)로 차량 제어보드에 송신
+ *
+ * 설계 기준:
+ *  - Motor ECU는 GearState를 받지 않는다.
+ *  - Motor ECU는 CAN 0x080 VehicleState를 사용하지 않는다.
+ *  - Motor ECU는 CAN 0x100 VehicleControlCmd만 기준으로 차량 제어보드에 UART 프레임을 송신한다.
+ *********************************************************************************************************************/
+
 #include "Ifx_Types.h"
 #include "IfxAsclin_Asc.h"
 #include "IfxCpu.h"
 #include "IfxScuWdt.h"
+#include "IfxPort.h"
 #include "Ifx_Cfg_Ssw.h"
 
-#define PI_START_BYTE   0x3B
-#define PI_END_BYTE     0x0D
+#include "MCMCAN.h"
+#include "can_type_def.h"
 
-// ==========================================
-// UART 핸들러
-// ASCLIN0 : 라즈베리파이 수신 / 자동차 송신
-// RX : P15.3 (X304-1)
-// TX : P15.2 (X304-2)
-// ==========================================
+/* ============================================================
+   Motor ECU MCMCAN.c에서 제공하는 함수
+   MCMCAN.h에 선언하지 않았다면 여기 extern으로 선언
+   ============================================================ */
 
-IfxAsclin_Asc g_asc;
-IfxCpu_syncEvent cpuSyncEvent = 0;
+extern boolean MotorCan_getLatestControlCmd(VehicleControlCmd_t *outCmd);
 
-uint8 frame[11];
+/* ============================================================
+   ASCLIN0 UART
+   차량 제어보드 송신용
+   TX : P15.2
+   RX : P15.3
+   Baudrate : 9600
+   ============================================================ */
 
-// ==========================================
-// FIFO 버퍼
-// ==========================================
+static IfxAsclin_Asc g_asc;
+IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
+
+static uint8 frame[11];
+
+/* ============================================================
+   FIFO Buffer
+   ============================================================ */
 
 #define TX_BUFFER_SIZE  (64 + sizeof(Ifx_Fifo) + 8)
 #define RX_BUFFER_SIZE  (64 + sizeof(Ifx_Fifo) + 8)
 
-IFX_ALIGN(4) uint8 g_txBuffer[64 + sizeof(Ifx_Fifo) + 8];
-IFX_ALIGN(4) uint8 g_rxBuffer[64 + sizeof(Ifx_Fifo) + 8];
+IFX_ALIGN(4) static uint8 g_txBuffer[TX_BUFFER_SIZE];
+IFX_ALIGN(4) static uint8 g_rxBuffer[RX_BUFFER_SIZE];
 
-// ==========================================
-// 인터럽트 우선순위
-// ==========================================
+/* ============================================================
+   ASCLIN Interrupt Priority
+   CAN RX는 MCMCAN.h에서 ISR_PRIORITY_CAN_RX 사용
+   UART는 기존처럼 10, 11, 12 사용
+   ============================================================ */
 
-#define ISR_PRIORITY_TX  10
-#define ISR_PRIORITY_RX  11
-#define ISR_PRIORITY_ER  12
+#define ISR_PRIORITY_ASCLIN_TX  10
+#define ISR_PRIORITY_ASCLIN_RX  11
+#define ISR_PRIORITY_ASCLIN_ER  12
 
-// ==========================================
-// ISR 핸들러
-// ==========================================
+/* ============================================================
+   ASCLIN ISR
+   ============================================================ */
 
-IFX_INTERRUPT(asclin0TxISR, 0, ISR_PRIORITY_TX)
+IFX_INTERRUPT(asclin0TxISR, 0, ISR_PRIORITY_ASCLIN_TX)
 {
     IfxAsclin_Asc_isrTransmit(&g_asc);
 }
 
-IFX_INTERRUPT(asclin0RxISR, 0, ISR_PRIORITY_RX)
+IFX_INTERRUPT(asclin0RxISR, 0, ISR_PRIORITY_ASCLIN_RX)
 {
     IfxAsclin_Asc_isrReceive(&g_asc);
 }
 
-IFX_INTERRUPT(asclin0ErISR, 0, ISR_PRIORITY_ER)
+IFX_INTERRUPT(asclin0ErISR, 0, ISR_PRIORITY_ASCLIN_ER)
 {
     IfxAsclin_Asc_isrError(&g_asc);
 }
 
-// ==========================================
-// 수신 데이터
-// ==========================================
+/* ============================================================
+   Private Function Prototypes
+   ============================================================ */
 
-volatile uint8 speed_value = 127;
-volatile uint8 steer_value = 127;
+static void initUART(void);
+static void uartSendBytes(uint8 *data, uint32 len);
 
-// ==========================================
-// UART 상태 머신
-// ==========================================
+static void convertThrottle(uint8 speed, char *out);
+static void convertSteering(uint8 steer, char *out);
 
-typedef enum
-{
-    WAIT_START,
-    RECEIVE_SPEED,
-    RECEIVE_STEER,
-    WAIT_END
+static void sendCarFrame(uint8 speed, uint8 steer, StopCmd_t stopCmd);
+static void handleVehicleControlCmd(const VehicleControlCmd_t *cmd);
 
-} UART_STATE;
+/* ============================================================
+   UART 초기화
+   ============================================================ */
 
-UART_STATE uart_state = WAIT_START;
-
-// ==========================================
-// UART 초기화
-// ==========================================
-
-void initUART(void)
+static void initUART(void)
 {
     IfxAsclin_Asc_Config ascConfig;
+
     IfxAsclin_Asc_initModuleConfig(&ascConfig, &MODULE_ASCLIN0);
 
     ascConfig.baudrate.baudrate  = 9600;
     ascConfig.baudrate.prescaler = 1;
 
-    ascConfig.interrupt.txPriority    = ISR_PRIORITY_TX;
-    ascConfig.interrupt.rxPriority    = ISR_PRIORITY_RX;
-    ascConfig.interrupt.erPriority    = ISR_PRIORITY_ER;
+    ascConfig.interrupt.txPriority    = ISR_PRIORITY_ASCLIN_TX;
+    ascConfig.interrupt.rxPriority    = ISR_PRIORITY_ASCLIN_RX;
+    ascConfig.interrupt.erPriority    = ISR_PRIORITY_ASCLIN_ER;
     ascConfig.interrupt.typeOfService = IfxSrc_Tos_cpu0;
 
     ascConfig.txBuffer     = g_txBuffer;
@@ -102,63 +120,55 @@ void initUART(void)
 
     const IfxAsclin_Asc_Pins pins =
     {
-        NULL,                           IfxPort_InputMode_pullUp,
+        NULL,                          IfxPort_InputMode_pullUp,
         &IfxAsclin0_RXB_P15_3_IN,      IfxPort_InputMode_pullUp,
-        NULL,                           IfxPort_OutputMode_pushPull,
+        NULL,                          IfxPort_OutputMode_pushPull,
         &IfxAsclin0_TX_P15_2_OUT,      IfxPort_OutputMode_pushPull,
         IfxPort_PadDriver_cmosAutomotiveSpeed1
     };
 
     ascConfig.pins = &pins;
 
-    // IfxCpu_Irq_installInterruptHandler 3줄 제거
-
     IfxAsclin_Asc_initModule(&g_asc, &ascConfig);
 }
 
-// ==========================================
-// UART 1Byte 수신
-// ==========================================
+/* ============================================================
+   UART 바이트 배열 송신
+   ============================================================ */
 
-uint8 uartReceiveByte(void)
+static void uartSendBytes(uint8 *data, uint32 len)
 {
-    return IfxAsclin_Asc_blockingRead(&g_asc);
-}
-
-// ==========================================
-// UART 바이트 배열 송신 (길이 기반)
-// ==========================================
-
-void uartSendBytes(uint8 *data, uint32 len)
-{
-    for(uint32 i = 0; i < len; i++)
+    for(uint32 i = 0U; i < len; i++)
     {
-        // FIFO 비워질 때까지 대기 후 송신
         IfxAsclin_Asc_flushTx(&g_asc, TIME_INFINITE);
         IfxAsclin_Asc_blockingWrite(&g_asc, data[i]);
     }
 }
 
-// ==========================================
-// 0~255 → 3자리 HEX 변환
-// ==========================================
+/* ============================================================
+   0~255 -> Throttle 3자리 ASCII HEX 변환
+   기존 코드 유지
+   ============================================================ */
 
-void convertThrottle(uint8 speed, char *out)
+static void convertThrottle(uint8 speed, char *out)
 {
     int value;
 
-    // -------------------------------
-    // 중립 = 0x3B3
-    // 최대 전진 = 0x440
-    // 최대 후진 = 0x36D
-    // -------------------------------
-
-    if(speed < 127)
+    /*
+     * 중립       = 0x3B3
+     * 최대 전진  = 0x440
+     * 최대 후진  = 0x36D
+     *
+     * 기존 코드 기준:
+     * speed < 127 : 전진 방향
+     * speed > 127 : 후진 방향
+     */
+    if(speed < 127U)
     {
         value = 0x3B3 +
                 ((127 - speed) * (0x440 - 0x3B3)) / 127;
     }
-    else if(speed > 127)
+    else if(speed > 127U)
     {
         value = 0x3B3 -
                 ((speed - 127) * (0x3B3 - 0x36D)) / 128;
@@ -169,32 +179,33 @@ void convertThrottle(uint8 speed, char *out)
     }
 
     const char hex[] = "0123456789ABCDEF";
+
     out[0] = hex[(value >> 8) & 0xF];
     out[1] = hex[(value >> 4) & 0xF];
     out[2] = hex[(value >> 0) & 0xF];
     out[3] = '\0';
 }
 
-// ==========================================
-// 조향 변환
-// ==========================================
+/* ============================================================
+   0~255 -> Steering 3자리 ASCII HEX 변환
+   기존 코드 유지
+   ============================================================ */
 
-void convertSteering(uint8 steer, char *out)
+static void convertSteering(uint8 steer, char *out)
 {
     int value;
 
-    // -------------------------------
-    // 중립 = 0x381
-    // 최대 좌회전 = 0x253
-    // 최대 우회전 = 0x505
-    // -------------------------------
-
-    if(steer < 127)
+    /*
+     * 중립        = 0x381
+     * 최대 좌회전  = 0x253
+     * 최대 우회전  = 0x505
+     */
+    if(steer < 127U)
     {
         value = 0x381 -
                 ((127 - steer) * (0x381 - 0x253)) / 127;
     }
-    else if(steer > 127)
+    else if(steer > 127U)
     {
         value = 0x381 +
                 ((steer - 127) * (0x505 - 0x381)) / 128;
@@ -205,104 +216,160 @@ void convertSteering(uint8 steer, char *out)
     }
 
     const char hex[] = "0123456789ABCDEF";
+
     out[0] = hex[(value >> 8) & 0xF];
     out[1] = hex[(value >> 4) & 0xF];
     out[2] = hex[(value >> 0) & 0xF];
     out[3] = '\0';
 }
 
-// ==========================================
-// 자동차 프레임 생성 및 송신
-// ==========================================
+/* ============================================================
+   차량 UART Frame 생성 및 송신
+   ============================================================ */
 
-void sendCarFrame(uint8 speed, uint8 steer)
+static void sendCarFrame(uint8 speed, uint8 steer, StopCmd_t stopCmd)
 {
     char throttleStr[4];
     char steeringStr[4];
 
+    /*
+     * STOP이면 강제로 중립값으로 변환
+     */
+    if(stopCmd == STOP_CMD_STOP)
+    {
+        speed = DRIVE_CMD_STOP_VALUE;
+        steer = STEERING_CMD_CENTER_VALUE;
+    }
+
     convertThrottle(speed, throttleStr);
     convertSteering(steer, steeringStr);
 
-    // -------------------------------
-    // 프레임 구성
-    // NULL STX [Throttle 3자리] [Steer 3자리] 0 1 ETX
-    // 총 11바이트
-    // -------------------------------
-
+    /*
+     * Frame 구성:
+     * frame[0]      = NULL
+     * frame[1]      = STX
+     * frame[2]~[4]  = throttle ASCII HEX 3자리
+     * frame[5]~[7]  = steering ASCII HEX 3자리
+     * frame[8]~[9]  = mode/stop field
+     * frame[10]     = ETX
+     */
 
     frame[0]  = 0x00;
     frame[1]  = 0x02;
+
     frame[2]  = throttleStr[0];
     frame[3]  = throttleStr[1];
     frame[4]  = throttleStr[2];
+
     frame[5]  = steeringStr[0];
     frame[6]  = steeringStr[1];
     frame[7]  = steeringStr[2];
-    frame[8]  = '0';
-    frame[9]  = '1';
+
+    /*
+     * 기존 주행 프레임: 0 1
+     * 비상 정지 프레임: 1 1
+     */
+    if(stopCmd == STOP_CMD_STOP)
+    {
+        frame[8] = '1';
+        frame[9] = '1';
+    }
+    else
+    {
+        frame[8] = '0';
+        frame[9] = '1';
+    }
+
     frame[10] = 0x03;
 
-    uartSendBytes(frame, 11);
+    uartSendBytes(frame, 11U);
 }
 
-// ==========================================
-// MAIN
-// ==========================================
+/* ============================================================
+   CAN VehicleControlCmd 처리
+   ============================================================ */
+
+static void handleVehicleControlCmd(const VehicleControlCmd_t *cmd)
+{
+    if(cmd == NULL_PTR)
+    {
+        return;
+    }
+
+    /*
+     * Motor ECU는 GearState를 판단하지 않는다.
+     * ZCU에서 온 0x100 VehicleControlCmd만 기준으로 동작한다.
+     *
+     * B2 stopCmd가 STOP이면 강제 정지.
+     */
+    if(cmd->stopCmd == STOP_CMD_STOP)
+    {
+        sendCarFrame(DRIVE_CMD_STOP_VALUE,
+                     STEERING_CMD_CENTER_VALUE,
+                     STOP_CMD_STOP);
+        return;
+    }
+
+    /*
+     * 정상 주행 명령.
+     */
+    sendCarFrame(cmd->driveCmd,
+                 cmd->steeringCmd,
+                 STOP_CMD_GO);
+}
+
+/* ============================================================
+   MAIN
+   ============================================================ */
 
 int core0_main(void)
 {
-    // 1. 인터럽트 먼저 활성화
+    VehicleControlCmd_t cmd;
+
     IfxCpu_enableInterrupts();
 
-    // 2. 워치독 비활성화 (안하면 리셋/트랩 발생)
     IfxScuWdt_disableCpuWatchdog(IfxScuWdt_getCpuWatchdogPassword());
     IfxScuWdt_disableSafetyWatchdog(IfxScuWdt_getSafetyWatchdogPassword());
 
-    // 3. 그 다음 동기화
-    IfxCpu_emitEvent(&cpuSyncEvent);
-    IfxCpu_waitEvent(&cpuSyncEvent, 1);
+    IfxCpu_emitEvent(&g_cpuSyncEvent);
+    IfxCpu_waitEvent(&g_cpuSyncEvent, 1);
 
-    // 4. UART 초기화
+    /*
+     * CAN 먼저 초기화
+     * Motor ECU MCMCAN.c는 0x100 VehicleControlCmd 수신 필터만 사용한다.
+     */
+    initMcmcan();
+
+    /*
+     * 차량 제어보드 UART 송신 초기화
+     */
     initUART();
+
+    /*
+     * 시작 시 안전을 위해 정지 프레임 1회 송신.
+     * stopCmd는 GO로 두되, speed/steer가 중립이므로 차량은 정지 상태.
+     */
+    sendCarFrame(DRIVE_CMD_STOP_VALUE,
+                 STEERING_CMD_CENTER_VALUE,
+                 STOP_CMD_GO);
+
+    cmd.driveCmd    = DRIVE_CMD_STOP_VALUE;
+    cmd.steeringCmd = STEERING_CMD_CENTER_VALUE;
+    cmd.stopCmd     = STOP_CMD_GO;
 
     while(1)
     {
-        if(IfxAsclin_Asc_canReadCount(&g_asc, 1, 0))
+        /*
+         * MCMCAN.c에서 CAN 0x100 수신 시
+         * g_motorNewCmdFlag = TRUE로 설정됨.
+         *
+         * 여기서는 새 0x100 명령이 들어왔을 때만 차량 UART 프레임을 송신.
+         */
+        if(MotorCan_getLatestControlCmd(&cmd) == TRUE)
         {
-            uint8 rx = IfxAsclin_Asc_blockingRead(&g_asc);
-
-            switch(uart_state)
-            {
-                case WAIT_START:
-                    if(rx == PI_START_BYTE)
-                    {
-                        uart_state = RECEIVE_SPEED;
-                    }
-                    break;
-
-                case RECEIVE_SPEED:
-                    speed_value = rx;
-                    uart_state  = RECEIVE_STEER;
-                    break;
-
-                case RECEIVE_STEER:
-                    steer_value = rx;
-                    uart_state  = WAIT_END;
-                    break;
-
-                case WAIT_END:
-                    if(rx == PI_END_BYTE)
-                    {
-                        sendCarFrame(speed_value, steer_value);
-                    }
-                    uart_state = WAIT_START;
-                    break;
-
-                default:
-                    uart_state = WAIT_START;
-                    break;
-            }
+            handleVehicleControlCmd(&cmd);
         }
     }
+
     return 0;
 }
