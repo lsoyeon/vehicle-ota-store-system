@@ -2,57 +2,79 @@ import os
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 import pygame
-import serial
+import socket
+import struct
 import time
 from collections import deque
 import RPi.GPIO as GPIO
 
 
 # ==========================================
-# UART (Raspberry Pi ↔ ZCU)
+# SOME/IP Ethernet 설정
 # ==========================================
-ser = serial.Serial(
-    port='/dev/serial0',
-    baudrate=9600,
-    timeout=0.01
-)
 
+# Raspberry Pi → ZCU
+ZCU_IP   = "192.168.10.2"
+ZCU_PORT = 30500
+
+# ZCU → Raspberry Pi
+RPI_IP   = "192.168.10.1"
+RPI_PORT = 30500
+
+SERVICE_ID_TX = 0x0002  
+METHOD_ID_TX  = 0x2002
+
+SERVICE_ID_RX = 0x0001
+METHOD_ID_RX  = 0x1001
+
+CLIENT_ID = 0x0001
+
+PROTOCOL_VERSION = 0x01
+INTERFACE_VERSION = 0x01
+
+MSG_TYPE_REQUEST  = 0x00
+MSG_TYPE_RESPONSE = 0x00
+
+RETURN_CODE_OK = 0x00
+
+session_id = 1
+
+# ==========================================
+# UDP Socket
+# ==========================================
+
+tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+rx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+rx_sock.bind((RPI_IP, RPI_PORT))
+
+rx_sock.setblocking(False)
+
+print(f"Listening SOME/IP : {RPI_PORT}")
 
 # ==========================================
 # 차량 상태 설정
 # ==========================================
-NEUTRAL_SPEED = 127
-STOP_DEADZONE = 10
 
+NEUTRAL_SPEED = 127
+
+STOP_DEADZONE = 10
 
 # ==========================================
 # FVSA 설정
 # ==========================================
+
 STOP_TIME_THRESHOLD = 2.0
 
-# 앞차 거리 증가 기준(mm)
 DISTANCE_DIFF_THRESHOLD = 700
 
-# ToF smoothing
 TOF_SMOOTH_FRAMES = 5
-
-
-# ==========================================
-# UART Frame
-# ==========================================
-
-# Raspberry Pi → ZCU
-TX_START_BYTE = 0x3B
-TX_END_BYTE   = 0x0D
-
-# ZCU → Raspberry Pi
-RX_START_BYTE = 0x3C
-RX_END_BYTE   = 0x0D
-
 
 # ==========================================
 # 부저 설정
 # ==========================================
+
 BUZZER_PIN = 18
 
 GPIO.setmode(GPIO.BCM)
@@ -63,13 +85,12 @@ buzzer = GPIO.PWM(BUZZER_PIN, 2000)
 
 buzzer.start(0)
 
-
 # ==========================================
 # 삐빅 알림음
 # ==========================================
+
 def beep():
 
-    # 첫 번째 삐
     buzzer.ChangeDutyCycle(50)
 
     time.sleep(0.15)
@@ -78,25 +99,24 @@ def beep():
 
     time.sleep(0.1)
 
-    # 두 번째 삐
     buzzer.ChangeDutyCycle(50)
 
     time.sleep(0.15)
 
     buzzer.ChangeDutyCycle(0)
 
-
 # ==========================================
 # pygame 초기화
 # ==========================================
+
 pygame.init()
 
 pygame.joystick.init()
 
-
 # ==========================================
 # 게임패드 연결 대기
 # ==========================================
+
 while pygame.joystick.get_count() == 0:
 
     print("게임패드 연결 대기중...")
@@ -107,20 +127,20 @@ while pygame.joystick.get_count() == 0:
 
     pygame.joystick.init()
 
-
 # ==========================================
 # 게임패드 연결
 # ==========================================
+
 js = pygame.joystick.Joystick(0)
 
 js.init()
 
 print("게임패드 연결됨 :", js.get_name())
 
-
 # ==========================================
 # Axis → Byte 변환
 # ==========================================
+
 def axis_to_byte(axis_value):
 
     value = int((axis_value + 1.0) * 127.5)
@@ -133,10 +153,73 @@ def axis_to_byte(axis_value):
 
     return value
 
+# ==========================================
+# SOME/IP 생성
+# ==========================================
+
+def build_someip(service_id,
+                 method_id,
+                 client_id,
+                 session_id,
+                 payload):
+
+    message_id = (service_id << 16) | method_id
+
+    request_id = (client_id << 16) | session_id
+
+    length = 8 + len(payload)
+
+    header = struct.pack(
+        "!IIIBBBB",
+        message_id,
+        length,
+        request_id,
+        PROTOCOL_VERSION,
+        INTERFACE_VERSION,
+        MSG_TYPE_REQUEST,
+        RETURN_CODE_OK
+    )
+
+    return header + payload
+
+# ==========================================
+# SOME/IP 파싱
+# ==========================================
+
+def parse_someip(data):
+
+    if len(data) < 16:
+        return None
+
+    (
+        message_id,
+        length,
+        request_id,
+        pv,
+        iv,
+        msg_type,
+        ret_code
+    ) = struct.unpack(
+        "!IIIBBBB",
+        data[:16]
+    )
+
+    service_id = (message_id >> 16) & 0xFFFF
+
+    method_id = message_id & 0xFFFF
+
+    payload = data[16:]
+
+    return {
+        "service_id": service_id,
+        "method_id": method_id,
+        "payload": payload
+    }
 
 # ==========================================
 # 상태 변수
 # ==========================================
+
 tof_history = deque(maxlen=TOF_SMOOTH_FRAMES)
 
 stopped_time = None
@@ -147,85 +230,69 @@ fvsa_triggered = False
 
 tof_distance_mm = None
 
-
 # ==========================================
-# UART RX Buffer
-# ==========================================
-rx_buffer = bytearray()
-
-
-# ==========================================
-# UART RX Parser
+# SOME/IP RX
 #
-# ZCU → Raspberry Pi
-#
-# Frame:
-# [0x3C][LOW][HIGH][0x0D]
+# Payload:
+# [LOW][HIGH]
 # ==========================================
-def read_tof_frame():
+
+def read_tof_someip():
 
     global tof_distance_mm
-    global rx_buffer
 
     try:
 
-        waiting = ser.in_waiting
+        data, addr = rx_sock.recvfrom(1024)
 
-        if waiting > 0:
+        parsed = parse_someip(data)
 
-            data = ser.read(waiting)
+        if parsed is None:
+            return
 
-            rx_buffer.extend(data)
+        if parsed["service_id"] != SERVICE_ID_RX:
+            return
 
-        while len(rx_buffer) >= 4:
+        if parsed["method_id"] != METHOD_ID_RX:
+            return
 
-            # 시작 바이트 확인
-            if rx_buffer[0] != RX_START_BYTE:
+        payload = parsed["payload"]
 
-                rx_buffer.pop(0)
+        if len(payload) < 2:
+            return
 
-                continue
+        low  = payload[0]
 
-            # 종료 바이트 확인
-            if rx_buffer[3] != RX_END_BYTE:
+        high = payload[1]
 
-                rx_buffer.pop(0)
+        distance = low | (high << 8)
 
-                continue
+        if 50 <= distance <= 10000:
 
-            # little endian
-            low = rx_buffer[1]
+            tof_history.append(distance)
 
-            high = rx_buffer[2]
+            tof_distance_mm = int(
+                sum(tof_history)
+                / len(tof_history)
+            )
 
-            distance = low | (high << 8)
+            print(
+                f"[RX SOME/IP] ToF : "
+                f"{tof_distance_mm} mm"
+            )
 
-            # 사용한 프레임 제거
-            del rx_buffer[:4]
+    except BlockingIOError:
 
-            # sanity check
-            if 50 <= distance <= 10000:
-
-                tof_history.append(distance)
-
-                tof_distance_mm = int(
-                    sum(tof_history)
-                    / len(tof_history)
-                )
-
-                print(
-                    f"[RX] ToF : "
-                    f"{tof_distance_mm} mm"
-                )
+        pass
 
     except Exception as rx_error:
 
         print("RX Error :", rx_error)
 
-
 # ==========================================
 # 메인 루프
 # ==========================================
+
 while True:
 
     try:
@@ -235,6 +302,7 @@ while True:
         # ==================================
         # 게임패드 입력
         # ==================================
+
         axis_speed = js.get_axis(1)
 
         axis_steer = js.get_axis(2)
@@ -246,22 +314,24 @@ while True:
         # ==================================
         # 차량 이동 상태
         # ==================================
+
         is_moving = (
             abs(speed_byte - NEUTRAL_SPEED)
             > STOP_DEADZONE
         )
 
         # ==================================
-        # ToF 수신
+        # SOME/IP ToF 수신
         # ==================================
-        read_tof_frame()
+
+        read_tof_someip()
 
         # ==================================
         # FVSA 로직
         # ==================================
+
         if not is_moving:
 
-            # 정차 시작 시간 저장
             if stopped_time is None:
 
                 stopped_time = time.time()
@@ -271,7 +341,6 @@ while True:
                 - stopped_time
             )
 
-            # 정차 시작 거리 저장
             if (
                 stopped_distance is None
                 and tof_distance_mm is not None
@@ -279,9 +348,6 @@ while True:
 
                 stopped_distance = tof_distance_mm
 
-            # ==================================
-            # 앞차 출발 감지
-            # ==================================
             if (
                 stop_duration
                 > STOP_TIME_THRESHOLD
@@ -294,13 +360,11 @@ while True:
                     - stopped_distance
                 )
 
-                # 거리 증가 감지
                 if (
                     dist_diff
                     > DISTANCE_DIFF_THRESHOLD
                 ):
 
-                    # 중복 알림 방지
                     if not fvsa_triggered:
 
                         print("")
@@ -316,6 +380,7 @@ while True:
         # ==================================
         # 차량 움직이면 초기화
         # ==================================
+
         else:
 
             stopped_time = None
@@ -325,29 +390,56 @@ while True:
             fvsa_triggered = False
 
         # ==================================
-        # Raspberry Pi → ZCU
+        # SOME/IP Payload 생성
         #
-        # Frame:
-        # [0x3B][speed][steer][0x0D]
+        # [speed][steer]
         # ==================================
-        packet = bytes([
-            TX_START_BYTE,
+
+        payload = bytes([
             speed_byte,
-            steer_byte,
-            TX_END_BYTE
+            steer_byte
         ])
+
+        # ==================================
+        # SOME/IP 패킷 생성
+        # ==================================
+
+        packet = build_someip(
+            SERVICE_ID_TX,
+            METHOD_ID_TX,
+            CLIENT_ID,
+            session_id,
+            payload
+        )
+
+        # ==================================
+        # Ethernet 송신
+        # ==================================
 
         try:
 
-            ser.write(packet)
+            tx_sock.sendto(
+                packet,
+                (ZCU_IP, ZCU_PORT)
+            )
 
         except Exception as tx_error:
 
             print("TX Error :", tx_error)
 
         # ==================================
+        # Session 증가
+        # ==================================
+
+        session_id += 1
+
+        if session_id > 0xFFFF:
+            session_id = 1
+
+        # ==================================
         # 디버깅 출력
         # ==================================
+
         print(
             f"Speed Axis : "
             f"{axis_speed:.3f} -> {speed_byte}"
@@ -391,7 +483,12 @@ while True:
         )
 
         print(
-            "Packet :",
+            "Payload :",
+            payload.hex().upper()
+        )
+
+        print(
+            "Packet  :",
             packet.hex().upper()
         )
 
@@ -409,10 +506,10 @@ while True:
 
         time.sleep(1)
 
-
 # ==========================================
 # 종료 처리
 # ==========================================
+
 buzzer.stop()
 
 GPIO.cleanup()
