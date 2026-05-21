@@ -47,7 +47,9 @@
 #include "App_Someip/App_Someip.h"
 #include "App_InfoService/App_InfoService.h"
 #include "App_Can/App_Can.h"
-#include "App_CanTest/App_CanTest.h"
+#include "App_AebService/App_AebService.h"
+#include "App_DriveService/App_DriveService.h"
+#include "App_SensorService/App_SensorService.h"
 
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
@@ -74,10 +76,12 @@ void core0_main(void)
     xTaskCreate(task_app_led_500ms, "APP LED", configMINIMAL_STACK_SIZE, NULL, 0, NULL);
 
     AppCan_Start();
-    AppCanTest_Start();
+    AppAebService_Start();
+    AppDriveService_Start();
     AppEth_Start();
     AppSomeip_Start();
     AppInfoService_Start();
+    AppSensorService_Start();
 
     /* Start the scheduler */
     vTaskStartScheduler();
