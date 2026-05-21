@@ -7,7 +7,7 @@ import time
 # ==========================================
 
 HPC_IP   = "192.168.10.1"   # HPC 라즈베리파이 IP로 변경
-HPC_PORT = 30500
+HPC_PORT = 30501
 
 CAMERA_INDEX = 0
 
@@ -15,7 +15,7 @@ FRAME_WIDTH  = 640
 FRAME_HEIGHT = 360
 
 FPS = 30                     # 송신 주기 (20~30 추천)
-JPEG_QUALITY = 50            # 40~60 추천
+JPEG_QUALITY = 20            # 40~60 추천
 
 # ==========================================
 # UDP Socket
