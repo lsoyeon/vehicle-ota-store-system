@@ -4,7 +4,8 @@ os.environ["SDL_VIDEODRIVER"] = "dummy"
 import cv2
 import numpy as np
 import pygame
-import serial
+import socket
+import struct
 import time
 import threading
 from collections import deque
@@ -27,6 +28,7 @@ ANGLE_DEADZONE      = 3.0
 SPEED_THRESHOLD     = 127
 STREAM_PORT         = 8080
 SENSITIVITY = 2.0  # 1.0이 기본, 높을수록 민감
+last_frame = None
 
 # ==========================================
 # 웹 스트리밍
@@ -49,7 +51,6 @@ class StreamHandler(BaseHTTPRequestHandler):
                            font-family: monospace; text-align: center; }
                     img  { width: 640px; border: 2px solid #0f0; }
                 </style>
-                <meta http-equiv="refresh" content="0">
             </head>
             <body>
                 <h2>LKAS Live Monitor</h2>
@@ -87,13 +88,65 @@ def start_stream_server():
 
 
 # ==========================================
-# UART 설정
+# SOME/IP 설정
 # ==========================================
-ser = serial.Serial(
-    port='/dev/serial0',
-    baudrate=9600,
-    timeout=1
+
+ZCU_IP = "192.168.10.2"
+ZCU_PORT = 30500
+
+SERVICE_ID = 0x0001
+METHOD_ID  = 0x1001
+
+CLIENT_ID = 0x0001
+
+PROTOCOL_VERSION = 0x01
+INTERFACE_VERSION = 0x01
+
+MSG_TYPE_REQUEST = 0x00
+RETURN_CODE_OK   = 0x00
+
+session_id = 1
+
+
+# ==========================================
+# UDP Socket
+# ==========================================
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+
+# ==========================================
+# 영상 수신 UDP Socket
+# ==========================================
+
+VIDEO_PORT = 30501
+
+video_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+video_sock.bind(("0.0.0.0", VIDEO_PORT))
+
+video_sock.setblocking(False)
+
+video_sock.setsockopt(
+    socket.SOL_SOCKET,
+    socket.SO_RCVBUF,
+    65535
 )
+
+print(f"Video Receiver Ready : {VIDEO_PORT}")
+
+
+# ==========================================
+# 기어 상태
+# ==========================================
+
+GEAR_P = "P"
+GEAR_D = "D"
+
+gear_state = GEAR_P
+
+prev_button_p = False
+prev_button_d = False
 
 
 # ==========================================
@@ -114,21 +167,6 @@ print("Gamepad connected:", js.get_name())
 
 
 # ==========================================
-# 카메라 초기화
-# ==========================================
-cap = cv2.VideoCapture(CAMERA_INDEX)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH,  IMAGE_SIZE[0])
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, IMAGE_SIZE[1])
-cap.set(cv2.CAP_PROP_FPS, 30)
-
-if not cap.isOpened():
-    print("Camera connection failed")
-    exit()
-
-print("Camera connected")
-
-
-# ==========================================
 # 변환 함수
 # ==========================================
 def axis_to_byte(axis_value):
@@ -139,6 +177,39 @@ def angle_to_byte(angle_deg):
     normalized = angle_deg / MAX_ANGLE
     normalized = max(-1.0, min(1.0, normalized))
     return axis_to_byte(normalized)
+
+
+# ==========================================
+# SOME/IP 패킷 생성
+# ==========================================
+
+def build_someip(service_id,
+                 method_id,
+                 client_id,
+                 session_id,
+                 payload):
+
+    message_id = (service_id << 16) | method_id
+    request_id = (client_id << 16) | session_id
+
+    # Request ID 4Byte
+    # PV/IV/Type/RC 4Byte
+    # + payload
+
+    length = 8 + len(payload)
+
+    header = struct.pack(
+        "!IIIBBBB",
+        message_id,
+        length,
+        request_id,
+        PROTOCOL_VERSION,
+        INTERFACE_VERSION,
+        MSG_TYPE_REQUEST,
+        RETURN_CODE_OK
+    )
+
+    return header + payload
 
 
 # ==========================================
@@ -323,15 +394,91 @@ while True:
     try:
         pygame.event.pump()
 
+        # ==================================
+        # 기어 버튼 입력
+        # ==================================
+
+        button_p = js.get_button(0)
+        button_d = js.get_button(1)
+
+        # 버튼 0 → P
+        if button_p and not prev_button_p:
+
+            gear_state = GEAR_P
+
+            print("")
+            print("==========")
+            print("GEAR -> P")
+            print("==========")
+            print("")
+
+        # 버튼 1 → D
+        if button_d and not prev_button_d:
+
+            gear_state = GEAR_D
+
+            print("")
+            print("==========")
+            print("GEAR -> D")
+            print("==========")
+            print("")
+
+        prev_button_p = button_p
+        prev_button_d = button_d
+
+        # ==================================
+        # 게임패드 Axis
+        # ==================================
+
         axis_speed = js.get_axis(1)
         axis_steer = js.get_axis(2)
+
         speed_byte = axis_to_byte(axis_speed)
+
+        # ==================================
+        # P단이면 강제 중립
+        # ==================================
+
+        if gear_state == GEAR_P:
+
+            speed_byte = 127
+            steer_byte = 127
+
+            axis_speed = 0.0
+            axis_steer = 0.0
+
+        else:
+
+            steer_byte = axis_to_byte(axis_steer)
 
         is_moving       = speed_byte < SPEED_THRESHOLD
         manual_steering = abs(axis_steer) > STEER_DEADZONE
 
-        # ── 카메라 + 차선 인식 (항상 실행) ──────────────
-        ret, frame = cap.read()
+        # ── UDP 영상 수신 + 차선 인식 (항상 실행) ──────────────
+
+        try:
+
+            data, addr = video_sock.recvfrom(65535)
+
+            np_data = np.frombuffer(data, dtype=np.uint8)
+
+            frame = cv2.imdecode(np_data, cv2.IMREAD_COLOR)
+
+            if frame is None:
+                raise Exception("Frame decode failed")
+
+            ret = True
+
+        except BlockingIOError:
+
+            ret = False
+
+        except Exception as video_error:
+
+            print("Video Receive Error:", video_error)
+
+            ret = False
+
         if ret:
             frame            = cv2.resize(frame, IMAGE_SIZE)
             frame_h, frame_w = frame.shape[:2]
@@ -343,23 +490,40 @@ while True:
             # 차선 중앙 smoothing
             if lane_center is not None and status == "ok":
                 lane_center_history.append(lane_center)
+
             if lane_center_history:
                 lane_center = int(np.mean(lane_center_history))
                 offset      = frame_w // 2 - lane_center - CALIBRATION_OFFSET
                 steer_angle = -(offset / (frame_w // 2)) * MAX_ANGLE * SENSITIVITY
+
+            last_frame = frame.copy()
+
         else:
-            frame            = np.zeros((IMAGE_SIZE[1], IMAGE_SIZE[0], 3), dtype=np.uint8)
-            frame_h, frame_w = IMAGE_SIZE[1], IMAGE_SIZE[0]
-            roi_y            = frame_h // 2
-            mask             = np.zeros((IMAGE_SIZE[1]//2, IMAGE_SIZE[0]), dtype=np.uint8)
-            steer_angle      = None
-            status           = "fail"
-            offset           = 0
-            lane_center      = None
-            lxs, lys, rxs, rys = [], [], [], []
+            if last_frame is not None:
+                frame = last_frame.copy()
+                frame_h, frame_w = frame.shape[:2]
+
+                blurred, roi_y = vision_preprocessing(frame)
+                mask = mask_generation(blurred)
+
+                steer_angle, status, offset, lane_center, lxs, lys, rxs, rys = \
+                    line_detection(mask, frame_w)
+
+            else:
+                continue
 
         # ── 조향값 결정 ──────────────────────────────────
-        if manual_steering or not LKAS_ENABLED or not is_moving:
+
+        if gear_state == GEAR_P:
+
+            speed_byte  = 127
+            steer_byte  = 127
+            smooth_angle = 0.0
+
+            control_mode = "P GEAR"
+
+        elif manual_steering or not LKAS_ENABLED or not is_moving:
+
             steer_byte   = axis_to_byte(axis_steer)
             smooth_angle = axis_steer * MAX_ANGLE
 
@@ -371,6 +535,7 @@ while True:
                 control_mode = "MANUAL(LKAS OFF)"
 
         else:
+
             if status == "ok" and steer_angle is not None:
                 steer_angle      = np.clip(steer_angle, -MAX_ANGLE, MAX_ANGLE)
                 angle_history.append(steer_angle)
@@ -385,10 +550,34 @@ while True:
 
             steer_byte   = angle_to_byte(smooth_angle)
             control_mode = f"LKAS ({status})"
+            
+        # ── SOME/IP Payload 생성 ───────────────────────
 
-        # ── UART 패킷 전송 ────────────────────────────────
-        packet = bytes([0x3B, speed_byte, steer_byte, 0x0D])
-        ser.write(packet)
+        payload = bytes([
+            speed_byte,
+            steer_byte
+        ])
+
+        # ── SOME/IP 패킷 생성 ─────────────────────────
+
+        packet = build_someip(
+            SERVICE_ID,
+            METHOD_ID,
+            CLIENT_ID,
+            session_id,
+            payload
+        )
+
+        # ── Ethernet UDP 송신 ────────────────────────
+
+        sock.sendto(packet, (ZCU_IP, ZCU_PORT))
+
+        # ── Session 증가 ─────────────────────────────
+
+        session_id += 1
+
+        if session_id > 0xFFFF:
+            session_id = 1
 
         # ── FPS 계산 ─────────────────────────────────────
         cur_time  = time.time()
@@ -405,7 +594,9 @@ while True:
 
         # ── 디버깅 출력 ───────────────────────────────────
         print(f"[{control_mode}] Angle: {smooth_angle:+.1f} | "
-              f"Speed: {speed_byte} | Steer: {steer_byte} | FPS: {fps:.1f}")
+            f"Speed: {speed_byte} | Steer: {steer_byte} | FPS: {fps:.1f}")
+
+        print(f"GEAR: {gear_state}")
         print(f"Packet: {packet.hex().upper()}")
         print("--------------------------------")
 
