@@ -87,11 +87,25 @@ typedef struct AppCanTpChannelConfig {
     TickType_t n_cr_timeout_ticks;             /* 0이면 기본값 사용 */
 } AppCanTpChannelConfig;
 
-#define APP_CAN_RAW_RX_OBJECT_COUNT           (3u)
+#define APP_CAN_RAW_RX_OBJECT_COUNT           (4u)
 static const AppCanRawRxObjectConfig g_appCanRawRxObjectConfigs[APP_CAN_MAX_RAW_RX_OBJECTS] = {
     { 0x200u, 4u, 1u },
     { 0x201u, 4u, 1u },
-    { 0x202u, 4u, 1u }
+    { 0x202u, 4u, 1u },
+
+    /*
+     * 0x601 UDS OTA Response
+     *
+     * Sensor ECU -> ZCU
+     * CAN FD raw frame
+     *
+     * 주의:
+     *  - App_Can은 0x601의 의미를 해석하지 않는다.
+     *  - App_OtaGateway 또는 UdsOtaClient 쪽에서
+     *    AppCan_RecvById(0x601, ...)로 순서대로 꺼내 처리한다.
+     *  - OTA 응답은 순서가 중요하므로 keep_latest보다 queue 수신을 사용한다.
+     */
+    { 0x601u, 8u, 0u }
 };
 static const uint8_t g_appCanRawRxObjectConfigCount = APP_CAN_RAW_RX_OBJECT_COUNT;
 

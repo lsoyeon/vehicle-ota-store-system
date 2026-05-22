@@ -50,6 +50,8 @@
 #include "App_AebService/App_AebService.h"
 #include "App_DriveService/App_DriveService.h"
 #include "App_SensorService/App_SensorService.h"
+#include "App_OtaGateway/App_OtaGateway.h"
+#include "App_OtaReceiver/App_OtaReceiver.h"
 
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
@@ -59,6 +61,11 @@ static void init_led_pin(const IfxPort_Pin *pin);
 static void task_app_led_500ms(void *arg);
 static void app_assert_pass(BaseType_t result);
 static void app_panic_loop(void);
+
+volatile uint32_t g_mainBeforeScheduler = 0U;
+volatile uint32_t g_mainAfterScheduler  = 0U;
+
+volatile size_t g_mainFreeHeapBeforeScheduler = 0U;
 
 void core0_main(void)
 {
@@ -84,11 +91,30 @@ void core0_main(void)
     app_assert_pass(AppSomeip_Start());
     app_assert_pass(AppInfoService_Start());
     app_assert_pass(AppSensorService_Start());
+    AppCan_Start();
+    (void)AppOtaGateway_Start();
+    AppOtaReceiver_Init();
+    AppAebService_Start();
+    AppDriveService_Start();
+    AppEth_Start();
+    AppSomeip_Start();
+    AppInfoService_Start();
+    AppSensorService_Start();
+
+    g_mainFreeHeapBeforeScheduler = xPortGetFreeHeapSize();
+
+    g_mainBeforeScheduler = 1U;
 
     /* Start the scheduler */
     vTaskStartScheduler();
 
     app_panic_loop();
+    
+    g_mainAfterScheduler = 1U;
+
+    while (1)
+    {
+    }
 }
 
 /* Required FreeRTOS callback, called in case of a stack overflow.
