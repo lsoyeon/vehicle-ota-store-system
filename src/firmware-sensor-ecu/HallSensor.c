@@ -31,12 +31,6 @@
 #define HALL_SPEED_CALC_PERIOD_MS       (10U)
 
 /*
- * IIR filter alpha = 1 / 4
- * filtered = filtered + (raw - filtered) / 4
- */
-#define HALL_SPEED_FILTER_DIV           (4)
-
-/*
  * 너무 짧은 펄스 간격은 노이즈로 무시
  * 10ms면 이론상 매우 높은 속도까지 허용하므로 일반 주행에서는 충분히 안전.
  */
@@ -59,7 +53,6 @@ static volatile uint32_t s_pulseCount = 0U;
 static volatile uint16_t s_vehicleSpeed = 0U;
 
 static uint8_t  s_prevDetected = 0U;
-static uint16_t s_filteredVehicleSpeed = 0U;
 
 /*
  * HallSensor_update1ms()가 1ms마다 호출된다는 전제의 소프트웨어 시간
@@ -138,7 +131,6 @@ void HallSensor_init(void)
     s_vehicleSpeed = 0U;
 
     s_prevDetected = 0U;
-    s_filteredVehicleSpeed = 0U;
 
     s_timeMs = 0U;
     s_lastPulseTimeMs = 0U;
@@ -248,9 +240,6 @@ void HallSensor_calcSpeed10ms(void)
     uint32_t rawSpeedX100;
     uint32_t denominator;
     uint32_t pulseAgeMs;
-    int32_t  speedDelta;
-    int32_t  filterStep;
-    int32_t  filteredSpeed;
 
     rawSpeedX100 = 0U;
     pulseAgeMs = 0U;
@@ -309,35 +298,7 @@ void HallSensor_calcSpeed10ms(void)
     debugHallRawVehicleSpeed = (uint16_t)rawSpeedX100;
     debugHallPulseAgeMs = pulseAgeMs;
 
-    /*
-     * IIR filter
-     * filtered = filtered + (raw - filtered) / HALL_SPEED_FILTER_DIV
-     */
-    speedDelta = (int32_t)rawSpeedX100 - (int32_t)s_filteredVehicleSpeed;
-    filterStep = speedDelta / HALL_SPEED_FILTER_DIV;
-
-    /*
-     * 차이가 있는데 정수 나눗셈 때문에 0이 되어버리면
-     * 최소 1씩은 따라가게 만든다.
-     */
-    if((filterStep == 0) && (speedDelta != 0))
-    {
-        filterStep = (speedDelta > 0) ? 1 : -1;
-    }
-
-    filteredSpeed = (int32_t)s_filteredVehicleSpeed + filterStep;
-
-    if(filteredSpeed < 0)
-    {
-        filteredSpeed = 0;
-    }
-    else if(filteredSpeed > 0xFFFF)
-    {
-        filteredSpeed = 0xFFFF;
-    }
-
-    s_filteredVehicleSpeed = (uint16_t)filteredSpeed;
-    s_vehicleSpeed = s_filteredVehicleSpeed;
+    s_vehicleSpeed = (uint16_t)rawSpeedX100;
 
     debugHallFilteredVehicleSpeed = s_vehicleSpeed;
 }
@@ -359,7 +320,6 @@ void HallSensor_reset(void)
     s_vehicleSpeed = 0U;
 
     s_prevDetected = 0U;
-    s_filteredVehicleSpeed = 0U;
 
     s_timeMs = 0U;
     s_lastPulseTimeMs = 0U;
