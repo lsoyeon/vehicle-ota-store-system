@@ -18,17 +18,18 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 LKAS_ENABLED        = True
 CAMERA_INDEX        = 0
 IMAGE_SIZE          = (640, 360)
-ROI_START_RATIO     = 0.55
+ROI_START_RATIO     = 0.5
 CALIBRATION_OFFSET  = 0
 MAX_ANGLE           = 20.0
 SMOOTH_FRAMES       = 5
 LANE_SMOOTH_FRAMES  = 10
 STEER_DEADZONE      = 0.1
 ANGLE_DEADZONE      = 3.0
-SPEED_THRESHOLD     = 127
+SPEED_THRESHOLD     = 117
 STREAM_PORT         = 8080
-SENSITIVITY = 2.0  # 1.0이 기본, 높을수록 민감
+SENSITIVITY = 3.0  # 1.0이 기본, 높을수록 민감
 last_frame = None
+vehicle_speed = 0
 
 # ==========================================
 # 웹 스트리밍
@@ -94,6 +95,13 @@ def start_stream_server():
 ZCU_IP = "192.168.10.2"
 ZCU_PORT = 30500
 
+# RX (Vehicle Speed)
+SERVICE_ID_SPEED = 0x0002
+METHOD_ID_SPEED  = 0x2003
+
+RPI_IP   = "192.168.10.1"
+RPI_PORT = 30500
+
 SERVICE_ID = 0x0001
 METHOD_ID  = 0x1001
 
@@ -113,6 +121,19 @@ session_id = 1
 # ==========================================
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+
+# ==========================================
+# Vehicle Speed RX Socket
+# ==========================================
+
+rx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+rx_sock.bind((RPI_IP, RPI_PORT))
+
+rx_sock.setblocking(False)
+
+print(f"Vehicle Speed RX Ready : {RPI_PORT}")
 
 
 # ==========================================
@@ -210,6 +231,87 @@ def build_someip(service_id,
     )
 
     return header + payload
+
+
+# ==========================================
+# SOME/IP 파싱
+# ==========================================
+
+def parse_someip(data):
+
+    if len(data) < 16:
+        return None
+
+    (
+        message_id,
+        length,
+        request_id,
+        pv,
+        iv,
+        msg_type,
+        ret_code
+    ) = struct.unpack(
+        "!IIIBBBB",
+        data[:16]
+    )
+
+    service_id = (message_id >> 16) & 0xFFFF
+
+    method_id = message_id & 0xFFFF
+
+    payload = data[16:]
+
+    return {
+        "service_id": service_id,
+        "method_id": method_id,
+        "payload": payload
+    }
+
+
+# ==========================================
+# Vehicle Speed SOME/IP RX
+# ==========================================
+
+def read_vehicle_speed():
+
+    global vehicle_speed
+
+    try:
+
+        while True:
+
+            data, addr = rx_sock.recvfrom(1024)
+
+            parsed = parse_someip(data)
+
+            if parsed is None:
+                continue
+
+            if (
+                parsed["service_id"] != SERVICE_ID_SPEED
+                or
+                parsed["method_id"] != METHOD_ID_SPEED
+            ):
+                continue
+
+            payload = parsed["payload"]
+
+            if len(payload) < 2:
+                continue
+
+            low  = payload[0]
+
+            high = payload[1]
+
+            vehicle_speed = low | (high << 8)
+
+    except BlockingIOError:
+
+        pass
+
+    except Exception as e:
+
+        print("Vehicle Speed RX Error :", e)
 
 
 # ==========================================
@@ -395,6 +497,12 @@ while True:
         pygame.event.pump()
 
         # ==================================
+        # Vehicle Speed 수신
+        # ==================================
+
+        read_vehicle_speed()
+
+        # ==================================
         # 기어 버튼 입력
         # ==================================
 
@@ -451,10 +559,11 @@ while True:
 
             steer_byte = axis_to_byte(axis_steer)
 
-        is_moving       = speed_byte < SPEED_THRESHOLD
+        is_moving = speed_byte < SPEED_THRESHOLD
         manual_steering = abs(axis_steer) > STEER_DEADZONE
 
         # ── UDP 영상 수신 + 차선 인식 (항상 실행) ──────────────
+        lxs, lys, rxs, rys = [], [], [], []
 
         try:
 
@@ -570,7 +679,10 @@ while True:
 
         # ── Ethernet UDP 송신 ────────────────────────
 
-        sock.sendto(packet, (ZCU_IP, ZCU_PORT))
+        try:
+            sock.sendto(packet, (ZCU_IP, ZCU_PORT))
+        except Exception as tx_error:
+            print("TX Error :", tx_error)
 
         # ── Session 증가 ─────────────────────────────
 
@@ -594,12 +706,21 @@ while True:
 
         # ── 디버깅 출력 ───────────────────────────────────
         print(f"[{control_mode}] Angle: {smooth_angle:+.1f} | "
-            f"Speed: {speed_byte} | Steer: {steer_byte} | FPS: {fps:.1f}")
+            f"Vehicle Speed: {vehicle_speed} | "
+            f"Steer: {steer_byte} | FPS: {fps:.1f}")
 
         print(f"GEAR: {gear_state}")
         print(f"Packet: {packet.hex().upper()}")
         print("--------------------------------")
 
+    except KeyboardInterrupt:
+        break
+
     except Exception as e:
         print("Error:", e)
         time.sleep(1)
+
+sock.close()
+rx_sock.close()
+video_sock.close()
+print("소켓 종료")
