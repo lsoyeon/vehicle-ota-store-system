@@ -7,6 +7,11 @@
  *  - UDS Positive / Negative Response 생성
  *  - Download / TransferData / TransferExit / RoutineControl / Reset 상태 관리
  *
+ * Cleanup 개선 내용:
+ *  - 새 Programming Session(0x10 02) 진입 시 이전 OTA 완료/오류 context 정리
+ *  - 새 RequestDownload(0x34) 시작 직전 FlashOta 내부 상태 정리
+ *  - 진행 중인 다운로드 중복 시작은 거절
+ *  - 리셋 없이 연속 OTA Download/Verify 테스트 가능하도록 상태 복구 강화
  *********************************************************************************************************************/
 
 #include "UdsOta.h"
@@ -34,6 +39,9 @@ static uint32_t readU32Le(const uint8_t *p);
 static void writeU16Le(uint8_t *p, uint16_t value);
 static void writeU32Le(uint8_t *p, uint32_t value);
 
+static boolean isDownloadActiveState(void);
+static void resetDownloadContextOnly(void);
+
 static void handleDiagnosticSessionControl(const uint8_t *payload, uint8_t length);
 static void handleRequestDownload(const uint8_t *payload, uint8_t length);
 static void handleTransferData(const uint8_t *payload, uint8_t length);
@@ -57,8 +65,13 @@ static boolean Target_EcuReset(uint8_t resetType);
 
 void UdsOta_init(void)
 {
-    UdsOta_reset();
+    /*
+     * FlashOta_Init()은 내부적으로 FlashOta_Reset()을 수행한다.
+     * 이후 UdsOta_reset()에서 UDS 상태도 초기화한다.
+     */
     FlashOta_Init();
+    UdsOta_reset();
+
     g_programmingAllowed = TRUE;
 }
 
@@ -71,6 +84,12 @@ void UdsOta_reset(void)
 
     g_udsOtaDebug.expectedBlockIndex = 0U;
     g_udsOtaDebug.expectedBlockSequenceCounter = 0x01U;
+
+    /*
+     * UDS OTA 전체 리셋 시 FlashOta 내부 상태도 같이 정리한다.
+     * 실제 Flash erase는 하지 않고, FlashOta debug/state만 초기화된다.
+     */
+    FlashOta_Reset();
 }
 
 void UdsOta_onRequest(const uint8_t *payload, uint8_t length)
@@ -159,8 +178,7 @@ boolean UdsOta_isProgrammingAllowed(void)
 
 boolean UdsOta_isDownloadInProgress(void)
 {
-    return ((g_udsOtaDebug.state == UDS_OTA_STATE_DOWNLOAD_REQUESTED) ||
-            (g_udsOtaDebug.state == UDS_OTA_STATE_TRANSFERRING));
+    return isDownloadActiveState();
 }
 
 boolean UdsOta_isCrcVerified(void)
@@ -246,6 +264,48 @@ static void writeU32Le(uint8_t *p, uint32_t value)
     p[3] = (uint8_t)((value >> 24) & 0xFFU);
 }
 
+static boolean isDownloadActiveState(void)
+{
+    boolean active = FALSE;
+
+    if ((g_udsOtaDebug.state == UDS_OTA_STATE_DOWNLOAD_REQUESTED) ||
+        (g_udsOtaDebug.state == UDS_OTA_STATE_TRANSFERRING))
+    {
+        active = TRUE;
+    }
+
+    return active;
+}
+
+static void resetDownloadContextOnly(void)
+{
+    /*
+     * 새 다운로드를 시작하기 전에 이전 OTA 결과/오류/전송 상태를 정리한다.
+     *
+     * 주의:
+     *  - requestCount, diagnosticSessionCount 같은 누적 카운터는 유지한다.
+     *  - 실제 PFLASH erase는 여기서 하지 않는다.
+     *  - FlashOta_Reset()은 FlashOta 내부 상태/debug만 초기화한다.
+     */
+    g_udsOtaDebug.firmwareSize = 0U;
+    g_udsOtaDebug.receivedBytes = 0U;
+
+    g_udsOtaDebug.memoryAddress = 0U;
+    g_udsOtaDebug.expectedCrc32 = 0U;
+    g_udsOtaDebug.calculatedCrc32 = 0U;
+
+    g_udsOtaDebug.expectedBlockIndex = 0U;
+    g_udsOtaDebug.lastBlockIndex = 0U;
+
+    g_udsOtaDebug.expectedBlockSequenceCounter = 0x01U;
+    g_udsOtaDebug.lastBlockSequenceCounter = 0U;
+
+    g_udsOtaDebug.lastNrc = 0U;
+    g_udsOtaDebug.lastErrorDetail = 0xFFFFFFFFU;
+
+    FlashOta_Reset();
+}
+
 /* ============================================================
    UDS handlers
    ============================================================ */
@@ -277,6 +337,23 @@ static void handleDiagnosticSessionControl(const uint8_t *payload, uint8_t lengt
         return;
     }
 
+    /*
+     * 다운로드 도중 새 programming session 요청이 들어오면
+     * 전송 중인 OTA context를 깨뜨릴 수 있으므로 거절한다.
+     */
+    if (isDownloadActiveState() == TRUE)
+    {
+        sendNegativeResponse(UDS_SID_DIAGNOSTIC_SESSION_CONTROL,
+                             UDS_NRC_CONDITIONS_NOT_CORRECT);
+        return;
+    }
+
+    /*
+     * 이전 OTA가 CRC_VERIFIED / ERROR / RESET_REQUESTED 등에 남아 있어도
+     * 새 programming session 진입 시 다음 다운로드가 가능하도록 정리한다.
+     */
+    resetDownloadContextOnly();
+
     g_udsOtaDebug.state = UDS_OTA_STATE_PROGRAMMING_SESSION;
 
     responsePayload[0] = UDS_SESSION_PROGRAMMING;
@@ -302,6 +379,18 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
      * B3~B6   MemoryAddress, little endian
      * B7~B10  MemorySize, little endian
      */
+
+    /*
+     * 진행 중인 다운로드가 있는데 새 RequestDownload가 들어오면 거절한다.
+     * 완료/오류 상태는 0x10 programming session에서 cleanup 후 들어오는 것을 원칙으로 한다.
+     */
+    if (isDownloadActiveState() == TRUE)
+    {
+        sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
+                             UDS_NRC_CONDITIONS_NOT_CORRECT);
+        return;
+    }
+
     if (g_udsOtaDebug.state != UDS_OTA_STATE_PROGRAMMING_SESSION)
     {
         sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
@@ -335,6 +424,12 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
                              UDS_NRC_REQUEST_OUT_OF_RANGE);
         return;
     }
+
+    /*
+     * 새 다운로드 시작 직전 이전 전송 context를 한 번 더 정리한다.
+     * 0x10에서 이미 정리했더라도 중복 호출되어도 문제 없다.
+     */
+    resetDownloadContextOnly();
 
     if (Target_BeginDownload(memoryAddress, memorySize) == FALSE)
     {
