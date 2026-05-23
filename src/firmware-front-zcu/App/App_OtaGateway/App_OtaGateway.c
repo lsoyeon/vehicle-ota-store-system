@@ -6,13 +6,14 @@
  *  - OtaGateway_MainFunction()을 1ms 주기로 호출한다.
  *  - AppCan_RecvById(0x601)로 Sensor ECU UDS Response를 수신한다.
  *  - 수신한 0x601 payload를 UdsOtaClient_OnResponse()로 전달한다.
- *  - Pi/HPC 계층에서 들어온 OTA_START / OTA_BLOCK 요청을 command queue로 받아 처리한다.
+ *  - Pi/HPC 계층에서 들어온 OTA_START / OTA_BLOCK / OTA_FINAL_CRC 요청을 command queue로 받아 처리한다.
  *
  * 현재 단계:
  *  - Download/Verify phase만 담당한다.
  *  - ZCU는 전체 firmware binary를 저장하지 않는다.
- *  - OTA_START에서는 firmwareSize / firmwareCrc32만 받는다.
+ *  - OTA_START에서는 firmwareSize만 받을 수도 있고, firmwareSize/firmwareCrc32를 같이 받을 수도 있다.
  *  - OTA_BLOCK에서는 현재 block 하나만 받는다.
+ *  - OTA_FINAL_CRC에서는 마지막 0x37 단계에서 받은 CRC32를 Gateway에 전달한다.
  *  - SOTA/UCB_SWAP activation은 아직 만들지 않는다.
  *********************************************************************************************************************/
 
@@ -66,7 +67,9 @@
 typedef enum
 {
     APP_OTA_GATEWAY_CMD_START_DOWNLOAD = 0,
+    APP_OTA_GATEWAY_CMD_START_DOWNLOAD_NO_CRC,
     APP_OTA_GATEWAY_CMD_PROVIDE_BLOCK,
+    APP_OTA_GATEWAY_CMD_SET_FINAL_CRC,
     APP_OTA_GATEWAY_CMD_CANCEL
 } AppOtaGateway_CommandType_t;
 
@@ -128,9 +131,17 @@ volatile uint32_t g_appOtaReqDownloadCallCount    = 0U;
 volatile uint32_t g_appOtaReqDownloadQueuedCount  = 0U;
 volatile uint32_t g_appOtaReqDownloadFailCount    = 0U;
 
+volatile uint32_t g_appOtaReqDownloadNoCrcCallCount    = 0U;
+volatile uint32_t g_appOtaReqDownloadNoCrcQueuedCount  = 0U;
+volatile uint32_t g_appOtaReqDownloadNoCrcFailCount    = 0U;
+
 volatile uint32_t g_appOtaProvideBlockCallCount   = 0U;
 volatile uint32_t g_appOtaProvideBlockQueuedCount = 0U;
 volatile uint32_t g_appOtaProvideBlockFailCount   = 0U;
+
+volatile uint32_t g_appOtaSetFinalCrcCallCount    = 0U;
+volatile uint32_t g_appOtaSetFinalCrcQueuedCount  = 0U;
+volatile uint32_t g_appOtaSetFinalCrcFailCount    = 0U;
 
 volatile uint32_t g_appOtaCancelCallCount         = 0U;
 volatile uint32_t g_appOtaCancelQueuedCount       = 0U;
@@ -139,7 +150,9 @@ volatile uint32_t g_appOtaCancelFailCount         = 0U;
 volatile uint32_t g_appOtaCmdProcessCallCount     = 0U;
 volatile uint32_t g_appOtaCmdProcessedCount       = 0U;
 volatile uint32_t g_appOtaCmdStartProcessedCount  = 0U;
+volatile uint32_t g_appOtaCmdStartNoCrcProcessedCount = 0U;
 volatile uint32_t g_appOtaCmdBlockProcessedCount  = 0U;
+volatile uint32_t g_appOtaCmdSetFinalCrcProcessedCount = 0U;
 volatile uint32_t g_appOtaCmdCancelProcessedCount = 0U;
 
 volatile uint32_t g_appOtaLastCmdType             = 0U;
@@ -150,8 +163,15 @@ volatile uint32_t g_appOtaLastCmdFirmwareCrc32    = 0U;
 
 volatile uint32_t g_appOtaGatewayStartOkCount     = 0U;
 volatile uint32_t g_appOtaGatewayStartFailCount   = 0U;
+
+volatile uint32_t g_appOtaGatewayStartNoCrcOkCount   = 0U;
+volatile uint32_t g_appOtaGatewayStartNoCrcFailCount = 0U;
+
 volatile uint32_t g_appOtaGatewayBlockOkCount     = 0U;
 volatile uint32_t g_appOtaGatewayBlockFailCount   = 0U;
+
+volatile uint32_t g_appOtaGatewaySetFinalCrcOkCount   = 0U;
+volatile uint32_t g_appOtaGatewaySetFinalCrcFailCount = 0U;
 
 
 /* ============================================================
@@ -163,8 +183,14 @@ volatile uint32_t g_appOtaGatewayBlockFailCount   = 0U;
  *  - Watch에서 g_appOtaDebugStartRequest = 1 로 변경
  *    → App_OtaGateway task 문맥에서 AppOtaGateway_RequestDownload() 호출
  *
+ *  - Watch에서 g_appOtaDebugStartNoCrcRequest = 1 로 변경
+ *    → App_OtaGateway task 문맥에서 AppOtaGateway_RequestDownloadWithoutCrc() 호출
+ *
  *  - WAIT_BLOCK 상태 진입 후 Watch에서 g_appOtaDebugBlock0Request = 1 로 변경
  *    → App_OtaGateway task 문맥에서 AppOtaGateway_ProvideBlock() 호출
+ *
+ *  - WAIT_FINAL_CRC 상태 진입 후 Watch에서 g_appOtaDebugFinalCrcRequest = 1 로 변경
+ *    → App_OtaGateway task 문맥에서 AppOtaGateway_SetFinalCrc() 호출
  *
  * Watch에서 변수 변경이 어려우면 AUTO_TEST를 사용한다.
  */
@@ -175,11 +201,20 @@ volatile uint32_t g_appOtaDebugStartCrc32      = 0x778EB6E5U;
 volatile uint32_t g_appOtaDebugStartDoneCount  = 0U;
 volatile BaseType_t g_appOtaDebugStartResult   = pdFAIL;
 
+volatile uint32_t g_appOtaDebugStartNoCrcRequest   = 0U;
+volatile uint32_t g_appOtaDebugStartNoCrcDoneCount = 0U;
+volatile BaseType_t g_appOtaDebugStartNoCrcResult  = pdFAIL;
+
 volatile uint32_t g_appOtaDebugBlock0Request   = 0U;
 volatile uint32_t g_appOtaDebugBlock0DoneCount = 0U;
 volatile BaseType_t g_appOtaDebugBlock0Result  = pdFAIL;
 volatile uint32_t g_appOtaDebugBlockIndex      = 0U;
 volatile uint8_t  g_appOtaDebugBlockLength     = UDS_OTA_CLIENT_TRANSFER_DATA_SIZE;
+
+volatile uint32_t g_appOtaDebugFinalCrcRequest   = 0U;
+volatile uint32_t g_appOtaDebugFinalCrcDoneCount = 0U;
+volatile BaseType_t g_appOtaDebugFinalCrcResult  = pdFAIL;
+volatile uint32_t g_appOtaDebugFinalCrc32        = 0x778EB6E5U;
 
 volatile uint32_t g_appOtaDebugCancelRequest   = 0U;
 volatile uint32_t g_appOtaDebugCancelDoneCount = 0U;
@@ -312,6 +347,75 @@ BaseType_t AppOtaGateway_RequestDownload(uint32_t firmwareSize,
 }
 
 
+BaseType_t AppOtaGateway_RequestDownloadWithoutCrc(uint32_t firmwareSize,
+                                                   TickType_t waitTicks)
+{
+    AppOtaGateway_Command_t cmd;
+    BaseType_t result;
+
+    g_appOtaReqDownloadNoCrcCallCount++;
+
+    if((g_appOtaCmdQueue == NULL) || (firmwareSize == 0U))
+    {
+        g_appOtaReqDownloadNoCrcFailCount++;
+        return pdFAIL;
+    }
+
+    memset(&cmd, 0, sizeof(cmd));
+
+    cmd.type = APP_OTA_GATEWAY_CMD_START_DOWNLOAD_NO_CRC;
+    cmd.firmwareSize = firmwareSize;
+    cmd.firmwareCrc32 = 0U;
+
+    result = xQueueSend(g_appOtaCmdQueue, &cmd, waitTicks);
+
+    if(result == pdPASS)
+    {
+        g_appOtaReqDownloadNoCrcQueuedCount++;
+    }
+    else
+    {
+        g_appOtaReqDownloadNoCrcFailCount++;
+    }
+
+    return result;
+}
+
+
+BaseType_t AppOtaGateway_SetFinalCrc(uint32_t firmwareCrc32,
+                                     TickType_t waitTicks)
+{
+    AppOtaGateway_Command_t cmd;
+    BaseType_t result;
+
+    g_appOtaSetFinalCrcCallCount++;
+
+    if(g_appOtaCmdQueue == NULL)
+    {
+        g_appOtaSetFinalCrcFailCount++;
+        return pdFAIL;
+    }
+
+    memset(&cmd, 0, sizeof(cmd));
+
+    cmd.type = APP_OTA_GATEWAY_CMD_SET_FINAL_CRC;
+    cmd.firmwareCrc32 = firmwareCrc32;
+
+    result = xQueueSend(g_appOtaCmdQueue, &cmd, waitTicks);
+
+    if(result == pdPASS)
+    {
+        g_appOtaSetFinalCrcQueuedCount++;
+    }
+    else
+    {
+        g_appOtaSetFinalCrcFailCount++;
+    }
+
+    return result;
+}
+
+
 BaseType_t AppOtaGateway_ProvideBlock(uint32_t blockIndex,
                                       const uint8_t *data,
                                       uint8_t length,
@@ -394,6 +498,12 @@ boolean AppOtaGateway_IsBusy(void)
 boolean AppOtaGateway_IsWaitingBlock(void)
 {
     return OtaGateway_IsWaitingBlock();
+}
+
+
+boolean AppOtaGateway_IsWaitingFinalCrc(void)
+{
+    return OtaGateway_IsWaitingFinalCrc();
 }
 
 
@@ -539,6 +649,20 @@ static void AppOtaGateway_ProcessDebugTrigger(void)
         g_appOtaDebugStartDoneCount++;
     }
 
+    if(g_appOtaDebugStartNoCrcRequest != 0U)
+    {
+        /*
+         * 한 번만 실행되도록 먼저 0으로 내린다.
+         */
+        g_appOtaDebugStartNoCrcRequest = 0U;
+
+        g_appOtaDebugStartNoCrcResult =
+            AppOtaGateway_RequestDownloadWithoutCrc(g_appOtaDebugStartSize,
+                                                    0U);
+
+        g_appOtaDebugStartNoCrcDoneCount++;
+    }
+
     if(g_appOtaDebugBlock0Request != 0U)
     {
         /*
@@ -553,6 +677,20 @@ static void AppOtaGateway_ProcessDebugTrigger(void)
                                        0U);
 
         g_appOtaDebugBlock0DoneCount++;
+    }
+
+    if(g_appOtaDebugFinalCrcRequest != 0U)
+    {
+        /*
+         * 한 번만 실행되도록 먼저 0으로 내린다.
+         */
+        g_appOtaDebugFinalCrcRequest = 0U;
+
+        g_appOtaDebugFinalCrcResult =
+            AppOtaGateway_SetFinalCrc(g_appOtaDebugFinalCrc32,
+                                      0U);
+
+        g_appOtaDebugFinalCrcDoneCount++;
     }
 
     if(g_appOtaDebugCancelRequest != 0U)
@@ -671,6 +809,26 @@ static void AppOtaGateway_ProcessCommands(void)
                 break;
             }
 
+            case APP_OTA_GATEWAY_CMD_START_DOWNLOAD_NO_CRC:
+            {
+                g_appOtaCmdStartNoCrcProcessedCount++;
+                g_appOtaLastCmdFirmwareSize = cmd.firmwareSize;
+                g_appOtaLastCmdFirmwareCrc32 = 0U;
+
+                gatewayResult = OtaGateway_StartWithoutCrc(cmd.firmwareSize);
+
+                if(gatewayResult == OTA_GATEWAY_RESULT_OK)
+                {
+                    g_appOtaGatewayStartNoCrcOkCount++;
+                }
+                else
+                {
+                    g_appOtaGatewayStartNoCrcFailCount++;
+                }
+
+                break;
+            }
+
             case APP_OTA_GATEWAY_CMD_PROVIDE_BLOCK:
             {
                 g_appOtaCmdBlockProcessedCount++;
@@ -688,6 +846,25 @@ static void AppOtaGateway_ProcessCommands(void)
                 else
                 {
                     g_appOtaGatewayBlockFailCount++;
+                }
+
+                break;
+            }
+
+            case APP_OTA_GATEWAY_CMD_SET_FINAL_CRC:
+            {
+                g_appOtaCmdSetFinalCrcProcessedCount++;
+                g_appOtaLastCmdFirmwareCrc32 = cmd.firmwareCrc32;
+
+                gatewayResult = OtaGateway_SetFinalCrc(cmd.firmwareCrc32);
+
+                if(gatewayResult == OTA_GATEWAY_RESULT_OK)
+                {
+                    g_appOtaGatewaySetFinalCrcOkCount++;
+                }
+                else
+                {
+                    g_appOtaGatewaySetFinalCrcFailCount++;
                 }
 
                 break;

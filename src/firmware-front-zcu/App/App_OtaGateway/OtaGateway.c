@@ -9,6 +9,16 @@
  * 현재 단계:
  *  - bin download + CRC 검증까지만 담당한다.
  *  - SOTA/UCB_SWAP activation은 별도 단계에서 수행한다.
+ *
+ * CRC 모드:
+ *  1. CRC known mode
+ *     - OtaGateway_Start(firmwareSize, firmwareCrc32)
+ *
+ *  2. Late CRC mode
+ *     - OtaGateway_StartWithoutCrc(firmwareSize)
+ *     - 모든 block 전송 완료 후 WAIT_FINAL_CRC에서 대기
+ *     - OtaGateway_SetFinalCrc(firmwareCrc32) 호출 시
+ *       Sensor ECU 쪽 RequestTransferExit + RoutineControl CRC 진행
  *********************************************************************************************************************/
 
 #include "OtaGateway.h"
@@ -30,6 +40,7 @@ static OtaGateway_DebugInfo_t g_otaGatewayDebug;
 static void setState(OtaGateway_State_t state);
 static void setResult(OtaGateway_Result_t result);
 static void updateRequestedBlockInfo(void);
+static void updateFinalCrcFlag(boolean provided);
 
 
 /* ============================================================
@@ -60,6 +71,7 @@ void OtaGateway_Reset(void)
     g_otaGatewayDebug.state = OTA_GATEWAY_STATE_IDLE;
     g_otaGatewayDebug.lastResult = OTA_GATEWAY_RESULT_OK;
     g_otaGatewayDebug.progressPercent = 0U;
+    g_otaGatewayDebug.finalCrcProvided = FALSE;
 }
 
 
@@ -91,6 +103,7 @@ OtaGateway_Result_t OtaGateway_Start(uint32_t firmwareSize,
     g_otaGatewayDebug.firmwareSize = firmwareSize;
     g_otaGatewayDebug.firmwareCrc32 = firmwareCrc32;
     g_otaGatewayDebug.startRequestCount++;
+    updateFinalCrcFlag(TRUE);
 
     /*
      * 핵심:
@@ -106,6 +119,84 @@ OtaGateway_Result_t OtaGateway_Start(uint32_t firmwareSize,
         setState(OTA_GATEWAY_STATE_ERROR);
         return OTA_GATEWAY_RESULT_CLIENT_ERROR;
     }
+
+    setResult(OTA_GATEWAY_RESULT_OK);
+    setState(OTA_GATEWAY_STATE_IN_PROGRESS);
+
+    return OTA_GATEWAY_RESULT_OK;
+}
+
+
+OtaGateway_Result_t OtaGateway_StartWithoutCrc(uint32_t firmwareSize)
+{
+    UdsOtaClient_Result_t clientResult;
+
+    if(firmwareSize == 0U)
+    {
+        setResult(OTA_GATEWAY_RESULT_INVALID_PARAM);
+        return OTA_GATEWAY_RESULT_INVALID_PARAM;
+    }
+
+    if(OtaGateway_IsBusy() == TRUE)
+    {
+        setResult(OTA_GATEWAY_RESULT_BUSY);
+        return OTA_GATEWAY_RESULT_BUSY;
+    }
+
+    /*
+     * Late CRC mode:
+     *  - Pi/HPC -> ZCU DoIP 흐름에서는 CRC가 마지막 0x37에서 들어온다.
+     *  - 따라서 여기서는 firmwareSize만 가지고 Sensor ECU OTA를 시작한다.
+     */
+    OtaGateway_Reset();
+
+    g_otaGatewayDebug.firmwareSize = firmwareSize;
+    g_otaGatewayDebug.firmwareCrc32 = 0U;
+    g_otaGatewayDebug.startWithoutCrcRequestCount++;
+    updateFinalCrcFlag(FALSE);
+
+    clientResult = UdsOtaClient_StartStreamWithoutCrc(firmwareSize);
+
+    if(clientResult != UDS_OTA_CLIENT_RESULT_OK)
+    {
+        setResult(OTA_GATEWAY_RESULT_CLIENT_ERROR);
+        setState(OTA_GATEWAY_STATE_ERROR);
+        return OTA_GATEWAY_RESULT_CLIENT_ERROR;
+    }
+
+    setResult(OTA_GATEWAY_RESULT_OK);
+    setState(OTA_GATEWAY_STATE_IN_PROGRESS);
+
+    return OTA_GATEWAY_RESULT_OK;
+}
+
+
+OtaGateway_Result_t OtaGateway_SetFinalCrc(uint32_t firmwareCrc32)
+{
+    UdsOtaClient_Result_t clientResult;
+
+    /*
+     * CRC32 값 0x00000000도 이론상 유효할 수 있으므로 값 자체는 reject하지 않는다.
+     * 대신 상태만 확인한다.
+     */
+    if(UdsOtaClient_IsWaitingFinalCrc() == FALSE)
+    {
+        setResult(OTA_GATEWAY_RESULT_SEQUENCE_ERROR);
+        return OTA_GATEWAY_RESULT_SEQUENCE_ERROR;
+    }
+
+    clientResult = UdsOtaClient_SetFinalCrc(firmwareCrc32);
+
+    if(clientResult != UDS_OTA_CLIENT_RESULT_OK)
+    {
+        setResult(OTA_GATEWAY_RESULT_CLIENT_ERROR);
+        setState(OTA_GATEWAY_STATE_ERROR);
+        return OTA_GATEWAY_RESULT_CLIENT_ERROR;
+    }
+
+    g_otaGatewayDebug.firmwareCrc32 = firmwareCrc32;
+    g_otaGatewayDebug.finalCrcSetRequestCount++;
+    updateFinalCrcFlag(TRUE);
 
     setResult(OTA_GATEWAY_RESULT_OK);
     setState(OTA_GATEWAY_STATE_IN_PROGRESS);
@@ -226,6 +317,16 @@ void OtaGateway_MainFunction(void)
         return;
     }
 
+    if(UdsOtaClient_IsWaitingFinalCrc() == TRUE)
+    {
+        /*
+         * 모든 block은 Sensor ECU로 전달 완료.
+         * 이제 Pi/HPC가 0x37 단계에서 CRC32를 줄 때까지 대기한다.
+         */
+        setState(OTA_GATEWAY_STATE_WAIT_FINAL_CRC);
+        return;
+    }
+
     if(UdsOtaClient_IsBusy() == TRUE)
     {
         setState(OTA_GATEWAY_STATE_IN_PROGRESS);
@@ -257,6 +358,12 @@ boolean OtaGateway_IsBusy(void)
 boolean OtaGateway_IsWaitingBlock(void)
 {
     return (g_otaGatewayDebug.state == OTA_GATEWAY_STATE_WAIT_BLOCK) ? TRUE : FALSE;
+}
+
+
+boolean OtaGateway_IsWaitingFinalCrc(void)
+{
+    return (g_otaGatewayDebug.state == OTA_GATEWAY_STATE_WAIT_FINAL_CRC) ? TRUE : FALSE;
 }
 
 
@@ -318,6 +425,12 @@ static void setState(OtaGateway_State_t state)
 static void setResult(OtaGateway_Result_t result)
 {
     g_otaGatewayDebug.lastResult = result;
+}
+
+
+static void updateFinalCrcFlag(boolean provided)
+{
+    g_otaGatewayDebug.finalCrcProvided = provided;
 }
 
 

@@ -8,14 +8,22 @@
  * 역할:
  *  - OtaGateway/UdsOtaClient를 FreeRTOS task에서 주기적으로 실행한다.
  *  - App_Can에 저장된 0x601 UDS Response를 꺼내 UdsOtaClient_OnResponse()로 전달한다.
- *  - 상위 Pi/HPC 또는 App 계층에서 받은 OTA_START / OTA_BLOCK 요청을 OtaGateway로 전달한다.
+ *  - Pi/HPC/DoIP 계층에서 들어온 OTA_START / OTA_BLOCK / OTA_FINISH 요청을 command queue로 받아 처리한다.
  *
  * 현재 단계:
  *  - Download/Verify phase 담당
  *  - ZCU는 전체 firmware binary를 저장하지 않는다.
- *  - OTA_START에서는 firmwareSize / firmwareCrc32만 받는다.
  *  - OTA_BLOCK에서는 현재 요청된 32-byte block만 받는다.
  *  - SOTA/UCB_SWAP activation은 아직 수행하지 않는다.
+ *
+ * CRC 모드:
+ *  1. CRC known mode
+ *     - AppOtaGateway_RequestDownload(size, crc32)
+ *
+ *  2. Late CRC mode
+ *     - AppOtaGateway_RequestDownloadWithoutCrc(size)
+ *     - 모든 block 전송 후 WAIT_FINAL_CRC 상태에서 대기
+ *     - AppOtaGateway_SetFinalCrc(crc32) 호출 시 Sensor ECU 쪽 CRC 검증 진행
  *********************************************************************************************************************/
 
 #include "Ifx_Types.h"
@@ -47,13 +55,9 @@ BaseType_t AppOtaGateway_Start(void);
    ============================================================ */
 
 /**
- * @brief OTA Download 시작 요청
+ * @brief OTA Download 시작 요청 - CRC known mode
  *
- * 상위 Pi/HPC/App 계층에서 firmware size와 CRC32를 알게 되면 호출한다.
- *
- * 내부 동작:
- *  - command queue에 START_DOWNLOAD 명령을 넣는다.
- *  - App_OtaGateway task 문맥에서 OtaGateway_Start()가 호출된다.
+ * 상위 Pi/HPC/App 계층에서 firmware size와 CRC32를 시작 시점에 알고 있으면 호출한다.
  *
  * @param firmwareSize  전체 firmware binary size
  * @param firmwareCrc32 전체 firmware CRC32
@@ -67,6 +71,41 @@ BaseType_t AppOtaGateway_RequestDownload(uint32_t firmwareSize,
 
 
 /**
+ * @brief OTA Download 시작 요청 - Late CRC mode
+ *
+ * Pi/HPC -> ZCU DoIP 흐름처럼 CRC32가 마지막 0x37에서 들어오는 경우 사용한다.
+ *
+ * 이 함수는 firmwareSize만으로 download를 시작한다.
+ * 모든 block 전송 후 App_OtaGateway는 WAIT_FINAL_CRC 상태가 된다.
+ * 이후 AppOtaGateway_SetFinalCrc()가 호출되면 Sensor ECU 쪽 CRC 검증을 진행한다.
+ *
+ * @param firmwareSize 전체 firmware binary size
+ * @param waitTicks    queue send 대기 tick
+ *
+ * @return pdPASS / pdFAIL
+ */
+BaseType_t AppOtaGateway_RequestDownloadWithoutCrc(uint32_t firmwareSize,
+                                                   TickType_t waitTicks);
+
+
+/**
+ * @brief Late CRC mode에서 최종 CRC32 설정
+ *
+ * Pi/HPC -> ZCU DoIP 흐름에서 0x37 RequestTransferExit 단계에 CRC32가 들어오면 호출한다.
+ *
+ * 호출 전 확인 권장:
+ *  - AppOtaGateway_IsWaitingFinalCrc() == TRUE
+ *
+ * @param firmwareCrc32 전체 firmware CRC32
+ * @param waitTicks     queue send 대기 tick
+ *
+ * @return pdPASS / pdFAIL
+ */
+BaseType_t AppOtaGateway_SetFinalCrc(uint32_t firmwareCrc32,
+                                     TickType_t waitTicks);
+
+
+/**
  * @brief 현재 요청된 firmware block 제공
  *
  * 상위 Pi/HPC/App 계층에서 block data를 받으면 호출한다.
@@ -75,10 +114,6 @@ BaseType_t AppOtaGateway_RequestDownload(uint32_t firmwareSize,
  *  - AppOtaGateway_IsWaitingBlock() == TRUE
  *  - blockIndex == AppOtaGateway_GetRequestedBlockIndex()
  *  - length == AppOtaGateway_GetRequestedLength()
- *
- * 내부 동작:
- *  - command queue에 PROVIDE_BLOCK 명령을 넣는다.
- *  - App_OtaGateway task 문맥에서 OtaGateway_ProvideBlock()이 호출된다.
  *
  * @param blockIndex 제공할 block index
  * @param data       block data pointer
@@ -109,6 +144,7 @@ BaseType_t AppOtaGateway_Cancel(TickType_t waitTicks);
 
 boolean AppOtaGateway_IsBusy(void);
 boolean AppOtaGateway_IsWaitingBlock(void);
+boolean AppOtaGateway_IsWaitingFinalCrc(void);
 boolean AppOtaGateway_IsDone(void);
 boolean AppOtaGateway_IsError(void);
 

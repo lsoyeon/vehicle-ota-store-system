@@ -3,12 +3,12 @@
  * \brief ZCU OTA input adapter layer with temporary self-test
  *
  * 역할:
- *  - 외부 입력 계층에서 받은 OTA_START / OTA_BLOCK 요청을 App_OtaGateway로 전달한다.
- *  - 현재 단계에서는 UART/SOMEIP/Ethernet 파싱은 하지 않는다.
+ *  - 외부 입력 계층에서 받은 OTA_START / OTA_BLOCK / OTA_FINAL_CRC 요청을 App_OtaGateway로 전달한다.
+ *  - 현재 단계에서는 UART/SOMEIP/Ethernet/DoIP 파싱은 하지 않는다.
  *
  * 현재 단계:
- *  - App_OtaReceiver -> App_OtaGateway -> OtaGateway -> UdsOtaClient 경로 검증
- *  - 임시 SelfTest task를 통해 OTA_START / OTA_BLOCK을 Receiver API 경유로 전달한다.
+ *  - App_OtaReceiver -> App_OtaGateway -> OtaGateway -> UdsOtaClient 경로 제공
+ *  - SelfTest는 기본 OFF
  *
  * 주의:
  *  - App_OtaGateway 내부 AutoTest는 반드시 꺼야 한다.
@@ -39,9 +39,9 @@
  *  - Gateway가 WAIT_BLOCK이면 AppOtaReceiver_ProvideBlock() 호출
  *
  * 0U:
- *  - 실제 Pi/HPC, UART, SOME/IP 입력 계층을 사용할 때는 반드시 꺼둔다.
+ *  - 실제 Pi/HPC, UART, SOME/IP, DoIP 입력 계층을 사용할 때는 반드시 꺼둔다.
  */
-#define APP_OTA_RECEIVER_SELF_TEST_ENABLE          (1u)
+#define APP_OTA_RECEIVER_SELF_TEST_ENABLE          (0u)
 #define APP_OTA_RECEIVER_SELF_TEST_DELAY_MS        (1000u)
 #define APP_OTA_RECEIVER_SELF_TEST_PERIOD_MS       (5u)
 
@@ -71,9 +71,21 @@ static boolean g_appOtaReceiverSelfTestTaskCreated = FALSE;
 
 volatile uint32_t g_appOtaReceiverInitCount = 0U;
 
+/* CRC known start */
 volatile uint32_t g_appOtaReceiverStartCallCount = 0U;
 volatile uint32_t g_appOtaReceiverStartOkCount = 0U;
 volatile uint32_t g_appOtaReceiverStartFailCount = 0U;
+
+/* Late CRC start */
+volatile uint32_t g_appOtaReceiverStartNoCrcCallCount = 0U;
+volatile uint32_t g_appOtaReceiverStartNoCrcOkCount = 0U;
+volatile uint32_t g_appOtaReceiverStartNoCrcFailCount = 0U;
+
+/* Final CRC */
+volatile uint32_t g_appOtaReceiverFinalCrcCallCount = 0U;
+volatile uint32_t g_appOtaReceiverFinalCrcOkCount = 0U;
+volatile uint32_t g_appOtaReceiverFinalCrcFailCount = 0U;
+
 volatile uint32_t g_appOtaReceiverLastFirmwareSize = 0U;
 volatile uint32_t g_appOtaReceiverLastFirmwareCrc32 = 0U;
 
@@ -115,14 +127,10 @@ volatile uint8_t  g_appOtaReceiverSelfTestLastBlockLength = 0U;
 /*
  * 테스트용 32-byte block.
  *
- * 64-byte 테스트에서는 아래 32-byte block을 두 번 보낸다.
- * 전체 데이터:
- *   00 01 02 ... 1F
- *   00 01 02 ... 1F
- *
- * CRC32:
- *   0x778EB6E5
+ * SelfTest가 꺼져 있을 때 warning을 피하기 위해 #if로 감싼다.
  */
+#if (APP_OTA_RECEIVER_SELF_TEST_ENABLE == 1u)
+
 static uint8_t g_appOtaReceiverSelfTestBlockData[APP_OTA_RECEIVER_TEST_BLOCK_SIZE] =
 {
     0x00U, 0x01U, 0x02U, 0x03U, 0x04U, 0x05U, 0x06U, 0x07U,
@@ -130,6 +138,8 @@ static uint8_t g_appOtaReceiverSelfTestBlockData[APP_OTA_RECEIVER_TEST_BLOCK_SIZ
     0x10U, 0x11U, 0x12U, 0x13U, 0x14U, 0x15U, 0x16U, 0x17U,
     0x18U, 0x19U, 0x1AU, 0x1BU, 0x1CU, 0x1DU, 0x1EU, 0x1FU
 };
+
+#endif
 
 
 /* ============================================================
@@ -152,6 +162,15 @@ void AppOtaReceiver_Init(void)
     g_appOtaReceiverStartCallCount = 0U;
     g_appOtaReceiverStartOkCount = 0U;
     g_appOtaReceiverStartFailCount = 0U;
+
+    g_appOtaReceiverStartNoCrcCallCount = 0U;
+    g_appOtaReceiverStartNoCrcOkCount = 0U;
+    g_appOtaReceiverStartNoCrcFailCount = 0U;
+
+    g_appOtaReceiverFinalCrcCallCount = 0U;
+    g_appOtaReceiverFinalCrcOkCount = 0U;
+    g_appOtaReceiverFinalCrcFailCount = 0U;
+
     g_appOtaReceiverLastFirmwareSize = 0U;
     g_appOtaReceiverLastFirmwareCrc32 = 0U;
 
@@ -225,6 +244,73 @@ BaseType_t AppOtaReceiver_StartDownload(uint32_t firmwareSize,
     else
     {
         g_appOtaReceiverStartFailCount++;
+    }
+
+    return result;
+}
+
+
+BaseType_t AppOtaReceiver_StartDownloadWithoutCrc(uint32_t firmwareSize,
+                                                  TickType_t waitTicks)
+{
+    BaseType_t result;
+
+    g_appOtaReceiverStartNoCrcCallCount++;
+    g_appOtaReceiverLastFirmwareSize = firmwareSize;
+    g_appOtaReceiverLastFirmwareCrc32 = 0U;
+
+    if((g_appOtaReceiverInitialized == FALSE) || (firmwareSize == 0U))
+    {
+        g_appOtaReceiverStartNoCrcFailCount++;
+        g_appOtaReceiverLastResult = pdFAIL;
+        return pdFAIL;
+    }
+
+    result = AppOtaGateway_RequestDownloadWithoutCrc(firmwareSize,
+                                                     waitTicks);
+
+    g_appOtaReceiverLastResult = result;
+
+    if(result == pdPASS)
+    {
+        g_appOtaReceiverStartNoCrcOkCount++;
+    }
+    else
+    {
+        g_appOtaReceiverStartNoCrcFailCount++;
+    }
+
+    return result;
+}
+
+
+BaseType_t AppOtaReceiver_SetFinalCrc(uint32_t firmwareCrc32,
+                                      TickType_t waitTicks)
+{
+    BaseType_t result;
+
+    g_appOtaReceiverFinalCrcCallCount++;
+    g_appOtaReceiverLastFirmwareCrc32 = firmwareCrc32;
+
+    if(g_appOtaReceiverInitialized == FALSE)
+    {
+        g_appOtaReceiverFinalCrcFailCount++;
+        g_appOtaReceiverLastResult = pdFAIL;
+        return pdFAIL;
+    }
+
+    result = AppOtaGateway_SetFinalCrc(firmwareCrc32,
+                                       waitTicks);
+
+    g_appOtaReceiverLastResult = result;
+
+    if(result == pdPASS)
+    {
+        g_appOtaReceiverFinalCrcOkCount++;
+    }
+    else
+    {
+        g_appOtaReceiverFinalCrcFailCount++;
     }
 
     return result;
@@ -322,6 +408,12 @@ boolean AppOtaReceiver_IsBusy(void)
 boolean AppOtaReceiver_IsWaitingBlock(void)
 {
     return AppOtaGateway_IsWaitingBlock();
+}
+
+
+boolean AppOtaReceiver_IsWaitingFinalCrc(void)
+{
+    return AppOtaGateway_IsWaitingFinalCrc();
 }
 
 

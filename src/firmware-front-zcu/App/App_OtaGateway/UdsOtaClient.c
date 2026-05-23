@@ -20,8 +20,20 @@
  *
  * Streaming Gateway 구조:
  *  - ZCU는 전체 firmware binary를 저장하지 않는다.
- *  - ZCU는 firmwareSize / crc32 / 현재 32-byte block만 보관한다.
- *  - Pi/Ethernet/Gateway 계층에서 필요한 block만 제공한다.
+ *  - ZCU는 firmwareSize / 현재 32-byte block만 보관한다.
+ *  - CRC32는 두 가지 모드를 지원한다.
+ *
+ * CRC 모드:
+ *  1. 기존 모드
+ *     - UdsOtaClient_StartStream(firmwareSize, crc32)
+ *     - OTA 시작 시점에 CRC32를 이미 알고 있다.
+ *
+ *  2. Late CRC 모드
+ *     - UdsOtaClient_StartStreamWithoutCrc(firmwareSize)
+ *     - Pi/HPC -> ZCU DoIP 흐름처럼 CRC32가 마지막 0x37에서 들어오는 경우 사용한다.
+ *     - 모든 block 전송 완료 후 WAIT_FINAL_CRC 상태에서 대기한다.
+ *     - 이후 UdsOtaClient_SetFinalCrc(crc32)가 호출되면
+ *       Sensor ECU 쪽 RequestTransferExit + RoutineControl CRC를 진행한다.
  *
  * Download Phase:
  *  - 0x10 DiagnosticSessionControl
@@ -154,6 +166,19 @@ static UdsOtaClient_DebugInfo_t g_clientDebug;
 static uint32_t g_firmwareSize = 0U;
 static uint32_t g_firmwareCrc32 = 0U;
 
+/*
+ * CRC 제공 여부.
+ *
+ * 기존 모드:
+ *  - StartStream(size, crc)에서 TRUE
+ *
+ * Late CRC 모드:
+ *  - StartStreamWithoutCrc(size)에서 FALSE
+ *  - 모든 block 전송 후 WAIT_FINAL_CRC에서 대기
+ *  - SetFinalCrc(crc) 호출 시 TRUE
+ */
+static boolean g_finalCrcProvided = FALSE;
+
 static volatile boolean g_responsePending = FALSE;
 static uint8_t g_responseData[CANFD_MAX_DLC];
 static uint8_t g_responseLength = 0U;
@@ -212,6 +237,9 @@ static boolean checkTimeout(uint32_t timeoutTicks);
 static uint32_t calcTotalBlocks(uint32_t size);
 static uint8_t calcCurrentBlockLength(void);
 
+static void proceedAfterAllBlocksSent(void);
+static void updateFinalCrcDebugFlag(void);
+
 
 /* ============================================================
    Public API
@@ -232,6 +260,7 @@ void UdsOtaClient_Reset(void)
 
     g_firmwareSize = 0U;
     g_firmwareCrc32 = 0U;
+    g_finalCrcProvided = FALSE;
 
     g_responsePending = FALSE;
     g_responseLength = 0U;
@@ -243,13 +272,14 @@ void UdsOtaClient_Reset(void)
     g_clientDebug.state = UDS_OTA_CLIENT_STATE_IDLE;
     g_clientDebug.lastResult = UDS_OTA_CLIENT_RESULT_OK;
     g_clientDebug.targetAddress = UDS_OTA_CLIENT_TARGET_APP_ADDR;
+    g_clientDebug.finalCrcProvided = g_finalCrcProvided;
 
     taskEXIT_CRITICAL();
 }
 
 
 /*
- * Streaming mode 시작.
+ * Streaming mode 시작 - CRC known.
  *
  * ZCU는 전체 firmware buffer를 넘기지 않는다.
  * firmwareSize와 crc32만 알고 시작한다.
@@ -274,6 +304,7 @@ UdsOtaClient_Result_t UdsOtaClient_StartStream(uint32_t firmwareSize,
 
     g_firmwareSize = firmwareSize;
     g_firmwareCrc32 = crc32;
+    g_finalCrcProvided = TRUE;
 
     g_clientDebug.firmwareSize = firmwareSize;
     g_clientDebug.firmwareCrc32 = crc32;
@@ -284,8 +315,86 @@ UdsOtaClient_Result_t UdsOtaClient_StartStream(uint32_t firmwareSize,
     g_clientDebug.sentBytes = 0U;
     g_clientDebug.currentBsc = 0x01U;
     g_clientDebug.lastProgressPercent = 0U;
+    updateFinalCrcDebugFlag();
 
     setState(UDS_OTA_CLIENT_STATE_SEND_DIAGNOSTIC_SESSION);
+
+    return UDS_OTA_CLIENT_RESULT_OK;
+}
+
+
+/*
+ * Streaming mode 시작 - CRC later.
+ *
+ * Pi/HPC -> ZCU DoIP 흐름에서 CRC32가 마지막 0x37에서 들어오는 경우 사용한다.
+ *
+ * 모든 block 전송 완료 후 WAIT_FINAL_CRC 상태에서 대기한다.
+ * 이후 UdsOtaClient_SetFinalCrc(crc32)가 호출되면
+ * RequestTransferExit + RoutineControl CRC를 진행한다.
+ */
+UdsOtaClient_Result_t UdsOtaClient_StartStreamWithoutCrc(uint32_t firmwareSize)
+{
+    if (firmwareSize == 0U)
+    {
+        return UDS_OTA_CLIENT_RESULT_INVALID_PARAM;
+    }
+
+    if (UdsOtaClient_IsBusy() == TRUE)
+    {
+        return UDS_OTA_CLIENT_RESULT_BUSY;
+    }
+
+    UdsOtaClient_Reset();
+
+    g_firmwareSize = firmwareSize;
+    g_firmwareCrc32 = 0U;
+    g_finalCrcProvided = FALSE;
+
+    g_clientDebug.firmwareSize = firmwareSize;
+    g_clientDebug.firmwareCrc32 = 0U;
+    g_clientDebug.targetAddress = UDS_OTA_CLIENT_TARGET_APP_ADDR;
+    g_clientDebug.totalBlocks = calcTotalBlocks(firmwareSize);
+    g_clientDebug.currentBlockIndex = 0U;
+    g_clientDebug.currentOffset = 0U;
+    g_clientDebug.sentBytes = 0U;
+    g_clientDebug.currentBsc = 0x01U;
+    g_clientDebug.lastProgressPercent = 0U;
+    updateFinalCrcDebugFlag();
+
+    setState(UDS_OTA_CLIENT_STATE_SEND_DIAGNOSTIC_SESSION);
+
+    return UDS_OTA_CLIENT_RESULT_OK;
+}
+
+
+/*
+ * Late CRC mode에서 최종 CRC32 설정.
+ *
+ * 호출 조건:
+ *  - 모든 block 전송 완료
+ *  - UdsOtaClient_IsWaitingFinalCrc() == TRUE
+ *
+ * 주의:
+ *  - crc32 == 0x00000000도 이론상 유효한 CRC일 수 있으므로 reject하지 않는다.
+ */
+UdsOtaClient_Result_t UdsOtaClient_SetFinalCrc(uint32_t crc32)
+{
+    if (g_clientDebug.state != UDS_OTA_CLIENT_STATE_WAIT_FINAL_CRC)
+    {
+        return UDS_OTA_CLIENT_RESULT_ERROR;
+    }
+
+    g_firmwareCrc32 = crc32;
+    g_finalCrcProvided = TRUE;
+
+    g_clientDebug.firmwareCrc32 = crc32;
+    updateFinalCrcDebugFlag();
+
+    /*
+     * 이제 Sensor ECU 쪽으로 RequestTransferExit를 보내고,
+     * 이후 RoutineControl CRC를 진행한다.
+     */
+    setState(UDS_OTA_CLIENT_STATE_SEND_REQUEST_TRANSFER_EXIT);
 
     return UDS_OTA_CLIENT_RESULT_OK;
 }
@@ -396,6 +505,20 @@ void UdsOtaClient_MainFunction(void)
         case UDS_OTA_CLIENT_STATE_WAIT_TRANSFER_DATA:
         {
             handleTransferDataResponse();
+            break;
+        }
+
+        case UDS_OTA_CLIENT_STATE_WAIT_FINAL_CRC:
+        {
+            /*
+             * Late CRC mode 전용.
+             *
+             * 모든 firmware block 전송이 끝난 상태.
+             * Pi/HPC가 0x37 단계에서 CRC32를 주면
+             * 상위 계층이 UdsOtaClient_SetFinalCrc()를 호출한다.
+             *
+             * 여기서는 CAN request를 보내지 않고 대기한다.
+             */
             break;
         }
 
@@ -527,6 +650,12 @@ boolean UdsOtaClient_IsWaitingStreamBlock(void)
 }
 
 
+boolean UdsOtaClient_IsWaitingFinalCrc(void)
+{
+    return (g_clientDebug.state == UDS_OTA_CLIENT_STATE_WAIT_FINAL_CRC) ? TRUE : FALSE;
+}
+
+
 uint32_t UdsOtaClient_GetRequestedBlockIndex(void)
 {
     return g_clientDebug.currentBlockIndex;
@@ -555,6 +684,7 @@ void UdsOtaClient_GetDebugInfo(UdsOtaClient_DebugInfo_t *info)
 {
     if (info != NULL_PTR)
     {
+        g_clientDebug.finalCrcProvided = g_finalCrcProvided;
         memcpy(info, &g_clientDebug, sizeof(UdsOtaClient_DebugInfo_t));
     }
 }
@@ -568,6 +698,7 @@ static void setState(UdsOtaClient_State_t state)
 {
     g_clientDebug.state = state;
     g_clientDebug.stateEnterTick = g_clientDebug.tickCount;
+    updateFinalCrcDebugFlag();
 }
 
 
@@ -575,6 +706,7 @@ static void setError(UdsOtaClient_Result_t result)
 {
     g_clientDebug.lastResult = result;
     g_clientDebug.state = UDS_OTA_CLIENT_STATE_ERROR;
+    updateFinalCrcDebugFlag();
 
     if (result == UDS_OTA_CLIENT_RESULT_TIMEOUT)
     {
@@ -596,6 +728,12 @@ static boolean checkTimeout(uint32_t timeoutTicks)
     }
 
     return FALSE;
+}
+
+
+static void updateFinalCrcDebugFlag(void)
+{
+    g_clientDebug.finalCrcProvided = g_finalCrcProvided;
 }
 
 
@@ -773,6 +911,28 @@ static uint8_t calcCurrentBlockLength(void)
 }
 
 
+static void proceedAfterAllBlocksSent(void)
+{
+    /*
+     * 기존 CRC known 모드:
+     *   StartStream(size, crc)로 시작했으면 CRC를 이미 알고 있으므로
+     *   바로 RequestTransferExit로 진행한다.
+     *
+     * Late CRC 모드:
+     *   StartStreamWithoutCrc(size)로 시작했으면
+     *   Pi/HPC가 0x37에서 CRC32를 줄 때까지 WAIT_FINAL_CRC에서 대기한다.
+     */
+    if (g_finalCrcProvided == TRUE)
+    {
+        setState(UDS_OTA_CLIENT_STATE_SEND_REQUEST_TRANSFER_EXIT);
+    }
+    else
+    {
+        setState(UDS_OTA_CLIENT_STATE_WAIT_FINAL_CRC);
+    }
+}
+
+
 /* ============================================================
    UDS send / response handlers
    ============================================================ */
@@ -895,7 +1055,7 @@ static void sendTransferData(void)
 
     if (g_clientDebug.currentBlockIndex >= g_clientDebug.totalBlocks)
     {
-        setState(UDS_OTA_CLIENT_STATE_SEND_REQUEST_TRANSFER_EXIT);
+        proceedAfterAllBlocksSent();
         return;
     }
 
@@ -988,7 +1148,7 @@ static void handleTransferDataResponse(void)
 
         if (g_clientDebug.currentBlockIndex >= g_clientDebug.totalBlocks)
         {
-            setState(UDS_OTA_CLIENT_STATE_SEND_REQUEST_TRANSFER_EXIT);
+            proceedAfterAllBlocksSent();
         }
         else
         {
@@ -1051,6 +1211,12 @@ static void handleRequestTransferExitResponse(void)
 static void sendRoutineControlCrc(void)
 {
     uint8_t p[CANFD_MAX_DLC];
+
+    if (g_finalCrcProvided == FALSE)
+    {
+        setError(UDS_OTA_CLIENT_RESULT_ERROR);
+        return;
+    }
 
     makePayload(p, 0x00U);
 

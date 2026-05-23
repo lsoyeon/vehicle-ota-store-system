@@ -30,6 +30,18 @@
  *  App_Can
  *      ↓
  *  Sensor ECU
+ *
+ * CRC 모드:
+ *  1. 기존 모드
+ *     - OtaGateway_Start(firmwareSize, firmwareCrc32)
+ *     - OTA 시작 시점에 CRC32를 이미 알고 있다.
+ *
+ *  2. Late CRC 모드
+ *     - OtaGateway_StartWithoutCrc(firmwareSize)
+ *     - Pi/HPC -> ZCU DoIP 흐름처럼 CRC32가 마지막 0x37에서 들어오는 경우 사용한다.
+ *     - 모든 block 전송 완료 후 WAIT_FINAL_CRC 상태에서 대기한다.
+ *     - 이후 OtaGateway_SetFinalCrc(firmwareCrc32)가 호출되면
+ *       Sensor ECU 쪽 RequestTransferExit + RoutineControl CRC를 진행한다.
  *********************************************************************************************************************/
 
 #include "Ifx_Types.h"
@@ -44,6 +56,18 @@ typedef enum
     OTA_GATEWAY_STATE_IDLE = 0,
     OTA_GATEWAY_STATE_IN_PROGRESS,
     OTA_GATEWAY_STATE_WAIT_BLOCK,
+
+    /*
+     * Late CRC mode 전용 상태.
+     *
+     * 모든 firmware block을 Sensor ECU로 전송한 뒤,
+     * Pi/HPC가 0x37 단계에서 CRC32를 줄 때까지 대기한다.
+     *
+     * OtaGateway_SetFinalCrc()가 호출되면
+     * UdsOtaClient가 RequestTransferExit + RoutineControl CRC를 진행한다.
+     */
+    OTA_GATEWAY_STATE_WAIT_FINAL_CRC,
+
     OTA_GATEWAY_STATE_DONE,
     OTA_GATEWAY_STATE_ERROR
 } OtaGateway_State_t;
@@ -76,6 +100,16 @@ typedef struct
     uint32_t firmwareSize;
     uint32_t firmwareCrc32;
 
+    /*
+     * TRUE:
+     *  - CRC32를 이미 알고 있는 기존 모드
+     *  - 또는 late CRC 모드에서 SetFinalCrc() 호출 완료
+     *
+     * FALSE:
+     *  - StartWithoutCrc()로 시작했고 아직 final CRC를 받지 않은 상태
+     */
+    boolean finalCrcProvided;
+
     uint32_t requestedBlockIndex;
     uint32_t requestedOffset;
     uint8_t  requestedLength;
@@ -86,6 +120,9 @@ typedef struct
     uint8_t  lastProvidedLength;
 
     uint32_t startRequestCount;
+    uint32_t startWithoutCrcRequestCount;
+    uint32_t finalCrcSetRequestCount;
+
     uint32_t blockRequestCount;
     uint32_t blockProvideOkCount;
     uint32_t blockProvideFailCount;
@@ -104,7 +141,7 @@ void OtaGateway_Init(void);
 void OtaGateway_Reset(void);
 
 /**
- * @brief OTA Download 시작
+ * @brief OTA Download 시작 - CRC known mode
  *
  * Pi/HPC 계층에서 OTA_START(size, crc32)를 받으면 호출한다.
  *
@@ -121,6 +158,36 @@ void OtaGateway_Reset(void);
  */
 OtaGateway_Result_t OtaGateway_Start(uint32_t firmwareSize,
                                      uint32_t firmwareCrc32);
+
+/**
+ * @brief OTA Download 시작 - Late CRC mode
+ *
+ * Pi/HPC -> ZCU DoIP 흐름에서는 CRC32가 마지막 0x37에서 들어올 수 있다.
+ * 이 함수는 firmwareSize만으로 Sensor ECU OTA download를 시작한다.
+ *
+ * 모든 block 전송 완료 후 Gateway는 OTA_GATEWAY_STATE_WAIT_FINAL_CRC 상태가 된다.
+ * 이후 OtaGateway_SetFinalCrc()가 호출되면
+ * Sensor ECU 쪽 RequestTransferExit + RoutineControl CRC를 진행한다.
+ *
+ * @param firmwareSize 전체 firmware size
+ *
+ * @return OTA_GATEWAY_RESULT_OK if accepted
+ */
+OtaGateway_Result_t OtaGateway_StartWithoutCrc(uint32_t firmwareSize);
+
+/**
+ * @brief Late CRC mode에서 최종 CRC32 설정
+ *
+ * Pi/HPC -> ZCU DoIP 흐름에서 0x37 RequestTransferExit 단계에 CRC32가 들어오면 호출한다.
+ *
+ * 호출 조건:
+ *  - OtaGateway_IsWaitingFinalCrc() == TRUE
+ *
+ * @param firmwareCrc32 전체 firmware CRC32
+ *
+ * @return OTA_GATEWAY_RESULT_OK if accepted
+ */
+OtaGateway_Result_t OtaGateway_SetFinalCrc(uint32_t firmwareCrc32);
 
 /**
  * @brief 현재 요청된 firmware block 제공
@@ -164,6 +231,7 @@ void OtaGateway_MainFunction(void);
 
 boolean OtaGateway_IsBusy(void);
 boolean OtaGateway_IsWaitingBlock(void);
+boolean OtaGateway_IsWaitingFinalCrc(void);
 boolean OtaGateway_IsDone(void);
 boolean OtaGateway_IsError(void);
 

@@ -21,8 +21,20 @@
  *
  * Streaming Gateway 구조:
  *  - ZCU는 전체 firmware binary를 저장하지 않는다.
- *  - firmwareSize / crc32 / 현재 32-byte block만 보관한다.
- *  - Pi/HPC 계층에서 필요한 block만 제공한다.
+ *  - firmwareSize / 현재 32-byte block만 보관한다.
+ *  - CRC32는 두 가지 모드를 지원한다.
+ *
+ * CRC 모드:
+ *  1. 기존 모드
+ *     - UdsOtaClient_StartStream(firmwareSize, crc32)
+ *     - OTA 시작 시점에 CRC를 이미 알고 있다.
+ *
+ *  2. Late CRC 모드
+ *     - UdsOtaClient_StartStreamWithoutCrc(firmwareSize)
+ *     - Pi/HPC -> ZCU DoIP 흐름처럼 CRC가 마지막 0x37에서 들어오는 경우 사용한다.
+ *     - 모든 block 전송 완료 후 WAIT_FINAL_CRC 상태에서 대기한다.
+ *     - 이후 UdsOtaClient_SetFinalCrc(crc32)가 호출되면
+ *       Sensor ECU 쪽 RequestTransferExit + RoutineControl CRC를 진행한다.
  *********************************************************************************************************************/
 
 #include "Ifx_Types.h"
@@ -53,13 +65,15 @@
 #endif
 
 /*
- * Sensor ECU FlashOta 기준:
- *  - Slot A / Active 후보: 0x80040000
- *  - Slot B / Download Target: 0x80302000
+ * Sensor ECU SOTA slot 기준:
+ *  - Slot A / App Start 후보: 0x80020000
+ *  - Slot B / App Start 후보: 0x80320000
  *
- * 주의:
- *  - 0x80300000 첫 sector에는 trap/start 영역이 있어 사용하지 않는다.
- *  - 현재 download phase는 0x80302000 이후 영역에 write/CRC까지만 수행한다.
+ * 현재 ZCU -> Sensor ECU download/verify 테스트는
+ * 현재 A active라고 가정하고 B slot인 0x80320000으로 전송한다.
+ *
+ * 최종 SOTA 구조에서는 현재 active group을 보고
+ * inactive slot 주소를 선택해야 한다.
  */
 #ifndef UDS_APP_START_ADDR
 #define UDS_APP_START_ADDR                 0x80320000U
@@ -181,6 +195,17 @@ typedef enum
     UDS_OTA_CLIENT_STATE_SEND_TRANSFER_DATA,
     UDS_OTA_CLIENT_STATE_WAIT_TRANSFER_DATA,
 
+    /*
+     * Late CRC mode 전용 상태.
+     *
+     * 모든 firmware block을 Sensor ECU로 전송한 뒤,
+     * Pi/HPC가 0x37 단계에서 CRC32를 줄 때까지 여기서 대기한다.
+     *
+     * UdsOtaClient_SetFinalCrc()가 호출되면
+     * SEND_REQUEST_TRANSFER_EXIT 상태로 진행한다.
+     */
+    UDS_OTA_CLIENT_STATE_WAIT_FINAL_CRC,
+
     UDS_OTA_CLIENT_STATE_SEND_REQUEST_TRANSFER_EXIT,
     UDS_OTA_CLIENT_STATE_WAIT_REQUEST_TRANSFER_EXIT,
 
@@ -245,6 +270,16 @@ typedef struct
     uint32_t lastProgressPercent;
 
     uint32_t calculatedCrc32FromEcu;
+
+    /*
+     * Late CRC mode 확인용.
+     *
+     * finalCrcProvided:
+     *  - TRUE  : CRC32를 이미 알고 있음
+     *  - FALSE : WAIT_FINAL_CRC에서 상위 계층의 CRC32 입력을 기다릴 수 있음
+     */
+    boolean finalCrcProvided;
+
 } UdsOtaClient_DebugInfo_t;
 
 /* ============================================================
@@ -256,16 +291,44 @@ void UdsOtaClient_Init(void);
 void UdsOtaClient_Reset(void);
 
 /**
- * @brief OTA download 시작 - streaming mode
+ * @brief OTA download 시작 - streaming mode, CRC known
  *
  * ZCU는 전체 firmware buffer를 저장하지 않는다.
  * firmwareSize와 crc32만 가지고 Sensor ECU에 RequestDownload를 시작한다.
  *
  * 이후 UdsOtaClient가 WAIT_STREAM_BLOCK 상태가 되면,
  * 상위 계층이 UdsOtaClient_ProvideStreamBlock()으로 현재 block을 제공해야 한다.
+ *
+ * 사용 예:
+ *  - 기존 Gateway AutoTest
+ *  - Receiver SelfTest
+ *  - 시작 시점에 CRC32를 이미 알고 있는 입력 계층
  */
 UdsOtaClient_Result_t UdsOtaClient_StartStream(uint32_t firmwareSize,
                                                uint32_t crc32);
+
+/**
+ * @brief OTA download 시작 - streaming mode, CRC later
+ *
+ * Pi/HPC -> ZCU DoIP 흐름에서는 CRC32가 마지막 0x37에서 들어올 수 있다.
+ * 이 함수는 firmwareSize만으로 download를 시작한다.
+ *
+ * 모든 block 전송이 끝나면 UDS_OTA_CLIENT_STATE_WAIT_FINAL_CRC 상태에서 대기한다.
+ * 이후 UdsOtaClient_SetFinalCrc()가 호출되면
+ * Sensor ECU 쪽 RequestTransferExit + RoutineControl CRC를 진행한다.
+ */
+UdsOtaClient_Result_t UdsOtaClient_StartStreamWithoutCrc(uint32_t firmwareSize);
+
+/**
+ * @brief 마지막 0x37 단계에서 받은 CRC32 설정
+ *
+ * 호출 조건:
+ *  - UdsOtaClient_IsWaitingFinalCrc() == TRUE
+ *
+ * 주의:
+ *  - crc32 == 0x00000000도 이론상 유효한 CRC일 수 있으므로 reject하지 않는다.
+ */
+UdsOtaClient_Result_t UdsOtaClient_SetFinalCrc(uint32_t crc32);
 
 /**
  * @brief OTA Client main function
@@ -296,6 +359,13 @@ boolean UdsOtaClient_IsDone(void);
 boolean UdsOtaClient_IsError(void);
 
 boolean UdsOtaClient_IsWaitingStreamBlock(void);
+
+/**
+ * @brief 모든 block 전송 후 최종 CRC 입력을 기다리는지 확인
+ *
+ * Late CRC mode에서만 TRUE가 된다.
+ */
+boolean UdsOtaClient_IsWaitingFinalCrc(void);
 
 uint32_t UdsOtaClient_GetRequestedBlockIndex(void);
 
