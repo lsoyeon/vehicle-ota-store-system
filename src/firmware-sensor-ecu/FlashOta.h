@@ -42,12 +42,14 @@
 #define FLASH_OTA_SLOT_B_START_ADDR_NC       0xA0320000U
 
 /*
- * 현재 단계에서 OTA Download Target은 Slot B로 설정한다.
+ * 현재 테스트 단계에서는 Slot A에서 실행 중이라고 가정하고,
+ * OTA Download Target을 Slot B로 고정한다.
  *
- * 1차 목표:
- *  - 새 firmware를 Slot B에 저장
- *  - CRC 검증 성공
- *  - 아직 실행 전환은 하지 않음
+ * 최종 A/B OTA 구조에서는 현재 active slot을 확인한 뒤
+ * inactive slot을 download target으로 선택해야 한다.
+ *
+ * A active → B update
+ * B active → A update
  */
 #define FLASH_OTA_DOWNLOAD_TARGET_ADDR_C     FLASH_OTA_SLOT_B_START_ADDR_C
 #define FLASH_OTA_DOWNLOAD_TARGET_ADDR_NC    FLASH_OTA_SLOT_B_START_ADDR_NC
@@ -55,19 +57,20 @@
 /*
  * 기존 코드 호환용 alias.
  *
- * FlashOta.c 수정 전까지 기존 이름을 깨지 않기 위해 유지한다.
- * 단, 앞으로 새 코드에서는 FLASH_OTA_DOWNLOAD_TARGET_ADDR_* 사용을 권장한다.
+ * 주의:
+ *  - 기존 FlashOta.c / UdsOta.c에서 APP_START_ADDR를 erase/write target으로 사용했을 수 있다.
+ *  - 따라서 이 alias는 현재 OTA 다운로드 대상인 Slot B를 가리키게 둔다.
+ *  - 실제 실행 App 시작 주소는 FLASH_OTA_SLOT_A_START_ADDR_* 를 직접 사용한다.
  */
-#define FLASH_OTA_APP_START_ADDR_C           FLASH_OTA_SLOT_A_START_ADDR_C
-#define FLASH_OTA_APP_START_ADDR_NC          FLASH_OTA_SLOT_A_START_ADDR_NC
-
+#define FLASH_OTA_APP_START_ADDR_C           FLASH_OTA_DOWNLOAD_TARGET_ADDR_C
+#define FLASH_OTA_APP_START_ADDR_NC          FLASH_OTA_DOWNLOAD_TARGET_ADDR_NC
 /* ============================================================
    Flash size policy
    ============================================================ */
 
 #define FLASH_OTA_PAGE_SIZE                  32U
 #define FLASH_OTA_SECTOR_SIZE_BYTES          0x2000U
-#define FLASH_OTA_MAX_IMAGE_SIZE             0x30000U
+#define FLASH_OTA_MAX_IMAGE_SIZE             0x002E0000U
 
 /* ============================================================
    Debug status
