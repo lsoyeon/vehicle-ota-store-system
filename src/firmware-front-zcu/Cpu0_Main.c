@@ -80,6 +80,9 @@ void core0_main(void)
      */
     IfxScuWdt_disableCpuWatchdog(IfxScuWdt_getCpuWatchdogPassword());
     IfxScuWdt_disableSafetyWatchdog(IfxScuWdt_getSafetyWatchdogPassword());
+
+    /* SOTA 초기화: SWAPEN disabled이면 next entry에 Bank A marker를 기록하고 SWAPEN enable 후 reset */
+    SOTA_InitialSetup();
     
     /* Wait for CPU sync event */
     IfxCpu_emitEvent(&g_cpuSyncEvent);

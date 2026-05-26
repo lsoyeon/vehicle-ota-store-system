@@ -6,6 +6,7 @@
 #include "IfxCpu.h"
 #include "FreeRTOS.h"
 #include "semphr.h"
+#include "App_Sota/App_Sota.h"
 
 static SemaphoreHandle_t g_print_mutex = NULL;
 
