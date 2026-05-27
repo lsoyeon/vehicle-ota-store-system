@@ -82,7 +82,9 @@ void core0_main(void)
     IfxCpu_waitEvent(&cpuSyncEvent, 1);
 
     init_UART();
-
+    if (!SOTA_IsInitialized()) {
+           SOTA_InitialSetup();
+    }
     g_isGroupBActive = SOTA_IsGroupBActive();
     g_isGroupBActive ? printf("Bootloader Bank B!\r\n") : printf("Bootloader Bank A!\r\n");    
 
