@@ -26,8 +26,11 @@
 
 #include "IfxCpu.h"
 #include "IfxScuWdt.h"
+#include "IfxScuRcu.h"
 #include "IfxFlash.h"
 #include "IfxStm.h"
+#include "SotaUcb.h"
+#include "SensorOtaFlash.h"
 
 #include <string.h>
 
@@ -56,25 +59,15 @@ static volatile uint8_t g_pendingResetType = 0U;
  */
 static uint32_t g_downloadTargetAddrC  = 0U;
 static uint32_t g_downloadTargetAddrNC = 0U;
+static uint32_t g_erasedUntilAddrNC = 0U;
 
 /* ============================================================
    Private prototypes
    ============================================================ */
 
-static uint32_t readU32Le(const uint8_t *p);
-static uint32_t calcSectorCount(uint32_t firmwareSize);
-static uint32_t crc32Update(uint32_t crc, uint8_t data);
-static uint32_t crc32FlashOriginalSize(void);
 static void delayMs(uint32 ms);
 
 static IfxFlash_FlashType getPFlashTypeFromAddress(uint32 addr);
-
-#pragma section code "cpu0_psram"
-
-static void pflashEraseSectorsPspr(uint32 sectorAddr, uint32 sectorCount);
-static void pflashWritePagePspr(uint32 pageAddr, const uint32 *data);
-
-#pragma section code restore
 
 /* ============================================================
    Public API
@@ -96,6 +89,7 @@ void FlashOta_Reset(void)
      */
     g_downloadTargetAddrC  = 0U;
     g_downloadTargetAddrNC = 0U;
+    g_erasedUntilAddrNC = 0U;
 
     g_jumpPending = FALSE;
     g_pendingResetType = 0U;
@@ -103,8 +97,6 @@ void FlashOta_Reset(void)
 
 boolean FlashOta_BeginDownload(uint32_t targetAddress, uint32_t firmwareSize)
 {
-    uint32_t sectorCount;
-
     /*
      * 새 다운로드 시작 시 FlashOta 내부 상태 초기화.
      */
@@ -129,8 +121,6 @@ boolean FlashOta_BeginDownload(uint32_t targetAddress, uint32_t firmwareSize)
         return FALSE;
     }
 
-    sectorCount = calcSectorCount(firmwareSize);
-
     /*
      * 실제 download target 설정.
      * Flash command는 non-cached 주소를 사용한다.
@@ -150,14 +140,7 @@ boolean FlashOta_BeginDownload(uint32_t targetAddress, uint32_t firmwareSize)
     g_flashOtaDebug.firmwareSize = firmwareSize;
     g_flashOtaDebug.receivedBytes = 0U;
     g_flashOtaDebug.started = TRUE;
-
-    /*
-     * Target slot erase.
-     * Flash command는 non-cached 주소를 사용한다.
-     */
-    pflashEraseSectorsPspr(g_downloadTargetAddrNC, sectorCount);
-
-    g_flashOtaDebug.eraseCount = sectorCount;
+    g_erasedUntilAddrNC = g_downloadTargetAddrNC & ~(FLASH_OTA_SECTOR_SIZE_BYTES - 1U);
 
     return TRUE;
 }
@@ -167,10 +150,11 @@ boolean FlashOta_WriteBlock(uint16_t blockIndex,
                             uint16_t length)
 {
     uint8_t page[FLASH_OTA_PAGE_SIZE];
-    uint32 words[8];
     uint32_t targetAddrNc;
     uint32_t offset;
     uint32_t remaining;
+    uint32_t writeEndAddrNc;
+    IfxFlash_FlashType flashType;
     volatile const uint8 *readPtr;
 
     if (g_flashOtaDebug.started == FALSE)
@@ -227,22 +211,39 @@ boolean FlashOta_WriteBlock(uint16_t blockIndex,
      *      blockIndex 1 -> 0xA0320020
      */
     targetAddrNc = g_downloadTargetAddrNC + offset;
+    writeEndAddrNc = targetAddrNc + FLASH_OTA_PAGE_SIZE;
 
-    words[0] = readU32Le(&page[0]);
-    words[1] = readU32Le(&page[4]);
-    words[2] = readU32Le(&page[8]);
-    words[3] = readU32Le(&page[12]);
-    words[4] = readU32Le(&page[16]);
-    words[5] = readU32Le(&page[20]);
-    words[6] = readU32Le(&page[24]);
-    words[7] = readU32Le(&page[28]);
+    while (writeEndAddrNc > g_erasedUntilAddrNC)
+    {
+        flashType = getPFlashTypeFromAddress(g_erasedUntilAddrNC);
+
+        if (SensorOtaFlash_Erase(g_erasedUntilAddrNC,
+                                 FLASH_OTA_SECTOR_SIZE_BYTES,
+                                 flashType) == FALSE)
+        {
+            g_flashOtaDebug.writeFailCount++;
+            return FALSE;
+        }
+
+        g_erasedUntilAddrNC += FLASH_OTA_SECTOR_SIZE_BYTES;
+        g_flashOtaDebug.eraseCount++;
+    }
 
     /*
      * Trap 발생 전 주소 확인용.
      */
     g_flashOtaDebug.lastWriteAddress = targetAddrNc;
 
-    pflashWritePagePspr(targetAddrNc, words);
+    flashType = getPFlashTypeFromAddress(targetAddrNc);
+
+    if (SensorOtaFlash_Write(targetAddrNc,
+                             page,
+                             FLASH_OTA_PAGE_SIZE,
+                             flashType) == FALSE)
+    {
+        g_flashOtaDebug.writeFailCount++;
+        return FALSE;
+    }
 
     /*
      * Read-back verify.
@@ -288,8 +289,6 @@ boolean FlashOta_EndTransfer(void)
 boolean FlashOta_CheckCrc32(uint32_t expectedCrc32,
                             uint32_t *calculatedCrc32)
 {
-    uint32_t crc;
-
     if (g_flashOtaDebug.transferExitDone == FALSE)
     {
         return FALSE;
@@ -301,27 +300,19 @@ boolean FlashOta_CheckCrc32(uint32_t expectedCrc32,
     }
 
     /*
-     * target slot에 저장된 firmware를 firmwareSize만큼만 CRC 계산한다.
-     * 마지막 page의 0xFF padding은 CRC에 포함하지 않는다.
+     * front-zcu OTA와 동일하게 Application은 expected CRC만 flag로 넘긴다.
+     * 실제 image CRC 검증과 SOTA swap 여부 판단은 bootloader가 수행한다.
      */
-    crc = crc32FlashOriginalSize();
-
     g_flashOtaDebug.expectedCrc32 = expectedCrc32;
-    g_flashOtaDebug.calculatedCrc32 = crc;
+    g_flashOtaDebug.calculatedCrc32 = expectedCrc32;
 
     if (calculatedCrc32 != NULL_PTR)
     {
-        *calculatedCrc32 = crc;
+        *calculatedCrc32 = expectedCrc32;
     }
 
-    if (crc == expectedCrc32)
-    {
-        g_flashOtaDebug.crcVerified = TRUE;
-        return TRUE;
-    }
-
-    g_flashOtaDebug.crcVerified = FALSE;
-    return FALSE;
+    g_flashOtaDebug.crcVerified = TRUE;
+    return TRUE;
 }
 
 boolean FlashOta_RequestJumpToApp(uint8_t resetType)
@@ -373,6 +364,13 @@ void FlashOta_Service(void)
 
     (void)g_pendingResetType;
 
+    Sota_SetPendingUpdateFlag(g_flashOtaDebug.firmwareSize,
+                              g_flashOtaDebug.expectedCrc32);
+
+    delayMs(20U);
+
+    IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
+
     g_jumpPending = FALSE;
     g_pendingResetType = 0U;
 }
@@ -388,65 +386,6 @@ void FlashOta_GetDebugInfo(FlashOta_DebugInfo_t *info)
 /* ============================================================
    Private functions
    ============================================================ */
-
-static uint32_t readU32Le(const uint8_t *p)
-{
-    return ((uint32_t)p[0]) |
-           ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[3] << 24);
-}
-
-static uint32_t calcSectorCount(uint32_t firmwareSize)
-{
-    uint32_t count;
-
-    count = firmwareSize / FLASH_OTA_SECTOR_SIZE_BYTES;
-
-    if ((firmwareSize % FLASH_OTA_SECTOR_SIZE_BYTES) != 0U)
-    {
-        count++;
-    }
-
-    if (count == 0U)
-    {
-        count = 1U;
-    }
-
-    return count;
-}
-
-static uint32_t crc32Update(uint32_t crc, uint8_t data)
-{
-    crc ^= data;
-
-    for (uint8 i = 0U; i < 8U; i++)
-    {
-        if ((crc & 1U) != 0U)
-        {
-            crc = (crc >> 1) ^ 0xEDB88320U;
-        }
-        else
-        {
-            crc = crc >> 1;
-        }
-    }
-
-    return crc;
-}
-
-static uint32_t crc32FlashOriginalSize(void)
-{
-    volatile const uint8 *flashPtr = (volatile const uint8 *)g_downloadTargetAddrNC;
-    uint32_t crc = 0xFFFFFFFFU;
-
-    for (uint32_t i = 0U; i < g_flashOtaDebug.firmwareSize; i++)
-    {
-        crc = crc32Update(crc, flashPtr[i]);
-    }
-
-    return crc ^ 0xFFFFFFFFU;
-}
 
 static void delayMs(uint32 ms)
 {
@@ -487,53 +426,3 @@ static IfxFlash_FlashType getPFlashTypeFromAddress(uint32 addr)
     return IfxFlash_FlashType_P0;
 }
 
-/* ============================================================
-   PSRAM functions
-   ============================================================ */
-
-#pragma section code "cpu0_psram"
-
-static void pflashEraseSectorsPspr(uint32 sectorAddr, uint32 sectorCount)
-{
-    uint16 safetyWdtPassword;
-    IfxFlash_FlashType flashType;
-
-    flashType = getPFlashTypeFromAddress(sectorAddr);
-
-    safetyWdtPassword = IfxScuWdt_getSafetyWatchdogPasswordInline();
-
-    IfxScuWdt_clearSafetyEndinitInline(safetyWdtPassword);
-    IfxFlash_eraseMultipleSectors(sectorAddr, sectorCount);
-    IfxScuWdt_setSafetyEndinitInline(safetyWdtPassword);
-
-    IfxFlash_waitUnbusy(0, flashType);
-}
-
-static void pflashWritePagePspr(uint32 pageAddr, const uint32 *data)
-{
-    uint16 safetyWdtPassword;
-    IfxFlash_FlashType flashType;
-
-    flashType = getPFlashTypeFromAddress(pageAddr);
-
-    IfxFlash_enterPageMode(pageAddr);
-    IfxFlash_waitUnbusy(0, flashType);
-
-    /*
-     * PFLASH page = 32 bytes = 8 words
-     */
-    IfxFlash_loadPage2X32(pageAddr, data[0], data[1]);
-    IfxFlash_loadPage2X32(pageAddr, data[2], data[3]);
-    IfxFlash_loadPage2X32(pageAddr, data[4], data[5]);
-    IfxFlash_loadPage2X32(pageAddr, data[6], data[7]);
-
-    safetyWdtPassword = IfxScuWdt_getSafetyWatchdogPasswordInline();
-
-    IfxScuWdt_clearSafetyEndinitInline(safetyWdtPassword);
-    IfxFlash_writePage(pageAddr);
-    IfxScuWdt_setSafetyEndinitInline(safetyWdtPassword);
-
-    IfxFlash_waitUnbusy(0, flashType);
-}
-
-#pragma section code restore

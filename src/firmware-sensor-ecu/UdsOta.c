@@ -22,6 +22,7 @@
 #include "UdsOta.h"
 #include "MCMCAN.h"
 #include "FlashOta.h"
+#include "SotaUcb.h"
 
 #include <string.h>
 
@@ -444,7 +445,14 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
      * 현재 검증 단계에서는 A active로 가정하고 Slot B에 다운로드한다.
      * 나중에 SOTA_IsGroupBActive() 연결 시 이 한 줄만 runtime 선택으로 교체하면 된다.
      */
-    targetMemoryAddress = FLASH_OTA_SLOT_B_START_ADDR_C;
+    if ((Sota_IsInitialized() == TRUE) && (Sota_IsGroupBActive() == TRUE))
+    {
+        targetMemoryAddress = FLASH_OTA_SLOT_A_START_ADDR_C;
+    }
+    else
+    {
+        targetMemoryAddress = FLASH_OTA_SLOT_B_START_ADDR_C;
+    }
 
     if ((memorySize == 0U) ||
         (memorySize > UDS_OTA_MAX_IMAGE_SIZE))
@@ -684,6 +692,14 @@ static void handleRoutineControl(const uint8_t *payload, uint8_t length)
     sendPositiveResponse(UDS_SID_ROUTINE_CONTROL,
                          responsePayload,
                          7U);
+
+    /*
+     * front-zcu OTA와 동일하게 CRC 값은 bootloader 검증용 flag에 넘긴다.
+     * 0x71 응답을 먼저 queue에 올린 뒤 background FlashOta_Service()에서
+     * flag 저장과 system reset을 수행한다.
+     */
+    g_udsOtaDebug.state = UDS_OTA_STATE_RESET_REQUESTED;
+    (void)Target_EcuReset(UDS_RESET_JUMP_TO_APP);
 }
 
 static void handleEcuReset(const uint8_t *payload, uint8_t length)

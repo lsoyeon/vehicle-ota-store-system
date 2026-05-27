@@ -69,7 +69,7 @@
    ============================================================ */
 
 #define FLASH_OTA_PAGE_SIZE                  32U
-#define FLASH_OTA_SECTOR_SIZE_BYTES          0x2000U
+#define FLASH_OTA_SECTOR_SIZE_BYTES          0x4000U
 #define FLASH_OTA_MAX_IMAGE_SIZE             0x002E0000U
 
 /* ============================================================
