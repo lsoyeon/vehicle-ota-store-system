@@ -1,6 +1,7 @@
 #include "ota_flash.h"
 #include "IfxCpu.h"
 #include <string.h>
+#include <stdio.h>
 
 /*************************************************************/
 /* 전역 변수                                                  */
@@ -199,6 +200,7 @@ boolean OTA_Flash_VerifyCRC(uint32 addr, uint32 size, uint32 expectedCRC)
      *       현재는 계산만 하고 항상 TRUE 반환 (개발 단계)
      */
     //return TRUE;
+    printf("crc : 0x%08X, size : %x%08X, expectedCRC: 0x%08X\r\n", crc, size, expectedCRC);
     return (crc == expectedCRC);  // 실제 비교
 }
 

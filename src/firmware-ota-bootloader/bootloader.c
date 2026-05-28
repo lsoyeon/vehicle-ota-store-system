@@ -99,9 +99,8 @@ void Bootloader_Main(void)
         if (1)
 #endif
         {
-            OTA_Flash_ClearFlag();
-
             printf("swap\n");
+            OTA_Flash_ClearFlag();
             for (int i = 0; i < 10000000; ++i);            
 
             if (isGroupBActive)
