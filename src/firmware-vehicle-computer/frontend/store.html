@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Feature Store</title>
+<style>
+:root {
+  --bg: #07090f;
+  --panel: rgba(12, 18, 32, 0.92);
+  --panel-strong: rgba(16, 24, 42, 0.96);
+  --border: rgba(255, 255, 255, 0.08);
+  --accent: #00c8ff;
+  --accent-2: #00e5a0;
+  --text: #ddeeff;
+  --muted: rgba(180, 210, 240, 0.58);
+  --warning: #ffaa44;
+  --radius: 14px;
+  font-family: "Noto Sans KR", "Segoe UI", sans-serif;
+}
+
+[data-theme="light"] {
+  --bg: #edf2f7;
+  --panel: rgba(255, 255, 255, 0.92);
+  --panel-strong: rgba(255, 255, 255, 0.98);
+  --border: rgba(10, 20, 35, 0.08);
+  --accent: #0070cc;
+  --accent-2: #00a06b;
+  --text: #0d1a2a;
+  --muted: rgba(30, 60, 100, 0.56);
+}
+
+[data-theme="blue"] {
+  --bg: #01050f;
+  --panel: rgba(4, 12, 36, 0.95);
+  --panel-strong: rgba(6, 16, 48, 0.98);
+  --border: rgba(100, 160, 255, 0.12);
+  --accent: #6090ff;
+  --accent-2: #c060ff;
+  --text: #c8d8ff;
+  --muted: rgba(160, 190, 255, 0.48);
+}
+
+[data-theme="luffy"] {
+  --bg: #fdf6ff;
+  --panel: rgba(255, 245, 255, 0.94);
+  --panel-strong: rgba(255, 248, 255, 0.98);
+  --border: rgba(200, 120, 220, 0.18);
+  --accent: #c87de8;
+  --accent-2: #ff8bc8;
+  --text: #4a2060;
+  --muted: rgba(100, 60, 130, 0.58);
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(0, 200, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 200, 255, 0.025) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+.page {
+  position: relative;
+  z-index: 1;
+  width: min(920px, 100%);
+  margin: 0 auto;
+  padding: 22px 16px 36px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 22px;
+}
+
+.back {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  padding: 9px 14px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.back:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.heading {
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  color: var(--accent);
+  font-size: 22px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+.subtitle {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.card {
+  min-height: 226px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(0, 200, 255, 0.45);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.22);
+}
+
+.card.purchased {
+  border-color: rgba(0, 229, 160, 0.38);
+}
+
+.badge-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 200, 255, 0.1);
+  border: 1px solid rgba(0, 200, 255, 0.25);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.kind {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  padding: 4px 9px;
+  font-size: 11px;
+}
+
+.name {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.35;
+}
+
+.desc {
+  flex: 1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.progress-line {
+  display: none;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.progress-line.show {
+  display: block;
+}
+
+.progress-fill {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.18s ease;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.buy {
+  min-width: 104px;
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 14px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #001018;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.buy:disabled {
+  cursor: default;
+  background: rgba(0, 229, 160, 0.12);
+  border: 1px solid rgba(0, 229, 160, 0.34);
+  color: var(--accent-2);
+}
+
+.loading,
+.error {
+  grid-column: 1 / -1;
+  padding: 60px 16px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.overlay.show {
+  display: flex;
+}
+
+.modal {
+  width: min(380px, 100%);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--panel-strong);
+  padding: 24px;
+  text-align: center;
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.45);
+}
+
+.modal-title {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.modal-desc {
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.modal-progress {
+  display: none;
+  margin: 0 0 18px;
+  text-align: left;
+}
+
+.modal-progress.show {
+  display: block;
+}
+
+.progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.progress-track {
+  height: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.progress-bar {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.18s ease;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.secondary,
+.primary {
+  flex: 1;
+  border-radius: 10px;
+  padding: 11px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.secondary {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+}
+
+.primary {
+  border: 0;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #001018;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translate(-50%, 12px);
+  z-index: 30;
+  opacity: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-strong);
+  color: var(--text);
+  padding: 10px 18px;
+  font-size: 13px;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  pointer-events: none;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+</style>
+</head>
+<body>
+<main class="page" id="page">
+  <header class="topbar">
+    <button class="back" type="button" onclick="location.href='/'">대시보드</button>
+    <div class="heading">
+      <h1 class="title" id="store-title">Feature Store</h1>
+      <p class="subtitle">차량 주행 보조 기능을 구매하고 설치 상태를 확인하세요.</p>
+    </div>
+  </header>
+
+  <section class="grid" id="grid">
+    <div class="loading">스토어 목록을 불러오는 중...</div>
+  </section>
+</main>
+
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <h2 class="modal-title" id="modal-title">-</h2>
+    <p class="modal-desc" id="modal-desc">-</p>
+    <div class="modal-progress" id="modal-progress">
+      <div class="progress-head">
+        <span id="progress-label">다운로드 준비 중</span>
+        <span id="progress-percent">0%</span>
+      </div>
+      <div class="progress-track">
+        <div class="progress-bar" id="progress-bar"></div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="secondary" type="button" onclick="closeModal()">취소</button>
+      <button class="primary" type="button" id="confirm-button">구매하기</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const FALLBACK_ITEMS = [
+  { id: "AEB", name: "AEB", full_name: "자동 긴급 제동", description: "전방 위험 상황을 감지하면 긴급 제동을 보조하는 기능입니다.", kind: "feature", latest_version: "1.0.0", downloadable: true, purchased: false, downloaded: false, applied: false },
+  { id: "FVSA", name: "FVSA", full_name: "앞차 출발 알림", description: "정차 중 앞차가 출발하면 운전자에게 알려주는 기능입니다.", kind: "feature", latest_version: "1.0.0", downloadable: true, purchased: false, downloaded: false, applied: false },
+  { id: "LKAS", name: "LKAS", full_name: "차선 유지 보조", description: "차선 중앙 주행을 돕는 보조 기능입니다.", kind: "feature", latest_version: "1.0.0", downloadable: true, purchased: false, downloaded: false, applied: false },
+  { id: "LUFFY_THEME", name: "테마(루피)", full_name: "루피 테마", description: "대시보드에 적용할 수 있는 루피 스타일 테마입니다.", kind: "theme", latest_version: "1.0.0", downloadable: false, purchased: false, downloaded: false, applied: false },
+];
+
+let selectedItem = null;
+let selectedEndpoint = "/api/store/purchase";
+let progressTimer = null;
+
+function itemInitial(item) {
+  if (item.id === "LUFFY_THEME") return "THEME";
+  return item.name || item.id;
+}
+
+function kindLabel(kind) {
+  return kind === "theme" ? "테마" : "기능";
+}
+
+function itemStatus(item) {
+  if (item.ota_progress?.active) {
+    const pct = Number.isFinite(item.ota_progress.percent) ? `${item.ota_progress.percent}%` : "";
+    return `다운로드 중 ${pct}`.trim();
+  }
+  if (!item.purchased) return "미구매";
+  if (item.downloadable && !item.downloaded) return "구매됨 · 다운로드 필요";
+  if (item.downloadable && item.downloaded && !item.applied) return "다운로드됨 · 런타임 적용 대기";
+  if (item.downloadable && item.applied) return "다운로드됨 · 적용됨";
+  return "구매됨";
+}
+
+function itemAction(item) {
+  if (!item.purchased) {
+    return { label: item.downloadable ? "구매/다운로드" : "구매하기", endpoint: "/api/store/purchase", disabled: false };
+  }
+  if (item.downloadable && !item.downloaded) {
+    return { label: "다운로드", endpoint: "/api/store/download", disabled: false };
+  }
+  if (item.downloadable && item.downloaded && !item.applied) {
+    return { label: "적용 대기", endpoint: "/api/store/download", disabled: true };
+  }
+  return { label: item.downloadable ? "다운로드됨" : "구매됨", endpoint: "/api/store/purchase", disabled: true };
+}
+
+function render(items) {
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+
+  items.forEach((item) => {
+    const action = itemAction(item);
+    const card = document.createElement("article");
+    card.className = `card${item.purchased ? " purchased" : ""}`;
+    card.innerHTML = `
+      <div class="badge-row">
+        <div class="mark">${itemInitial(item)}</div>
+        <div class="kind">${kindLabel(item.kind)}</div>
+      </div>
+      <h2 class="name">${item.full_name || item.name}</h2>
+      <p class="desc">${item.description || ""}</p>
+      <div class="meta">v${item.latest_version || "1.0.0"} · ${itemStatus(item)}</div>
+      <div class="progress-line ${item.ota_progress?.active ? "show" : ""}">
+        <div class="progress-fill" style="width:${Number.isFinite(item.ota_progress?.percent) ? item.ota_progress.percent : 0}%"></div>
+      </div>
+      <div class="actions">
+        <button class="buy" type="button" ${action.disabled ? "disabled" : ""}>
+          ${action.label}
+        </button>
+      </div>
+    `;
+
+    const button = card.querySelector(".buy");
+    if (!action.disabled) {
+      button.addEventListener("click", () => openModal(item, action));
+    }
+    grid.appendChild(card);
+  });
+}
+
+async function readApiResponse(response) {
+  const text = await response.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { detail: text.trim() || response.statusText };
+  }
+}
+
+function apiErrorMessage(error, fallback) {
+  if (error instanceof TypeError && String(error.message).includes("Failed to fetch")) {
+    return "서버 연결 실패: RPi API가 실행 중인지, 같은 네트워크인지 확인하세요.";
+  }
+  return error.message || fallback;
+}
+
+async function syncTheme() {
+  try {
+    const response = await fetch("/api/status");
+    const status = await response.json();
+    if (status.ui_theme) {
+      document.body.dataset.theme = status.ui_theme;
+      document.getElementById("page").dataset.theme = status.ui_theme;
+      document.getElementById("store-title").textContent =
+        status.ui_theme === "luffy" ? "Luffy Store" : "Feature Store";
+    }
+  } catch {
+    document.getElementById("store-title").textContent = "Feature Store";
+  }
+}
+
+async function loadStore() {
+  await syncTheme();
+  try {
+    const response = await fetch("/api/store/items");
+    const data = await readApiResponse(response);
+    if (!response.ok) throw new Error(data.detail || "store load failed");
+    render(data.items || []);
+  } catch (error) {
+    render(FALLBACK_ITEMS);
+    toast(apiErrorMessage(error, "서버 연결 전이라 기본 목록만 표시합니다."));
+  }
+}
+
+function openModal(item, action) {
+  stopProgressPolling();
+  selectedItem = item;
+  selectedEndpoint = action.endpoint;
+  document.getElementById("modal-title").textContent = item.full_name || item.name;
+  document.getElementById("modal-desc").textContent = item.description || "";
+  document.getElementById("confirm-button").textContent = action.label;
+  document.getElementById("confirm-button").disabled = false;
+  hideProgress();
+  document.getElementById("overlay").classList.add("show");
+}
+
+function closeModal() {
+  document.getElementById("overlay").classList.remove("show");
+  stopProgressPolling();
+  selectedItem = null;
+}
+
+async function confirmPurchase() {
+  if (!selectedItem) return;
+
+  const button = document.getElementById("confirm-button");
+  button.textContent = selectedItem.downloadable ? "다운로드 중..." : "저장 중...";
+  button.disabled = true;
+  if (selectedItem.downloadable) {
+    showProgress({ percent: 0, message: "다운로드 준비 중", active: true });
+    startProgressPolling(selectedItem.id);
+  }
+
+  try {
+    const response = await fetch(selectedEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ feature_id: selectedItem.id }),
+    });
+    const data = await readApiResponse(response);
+    if (!response.ok) throw new Error(data.detail || "purchase failed");
+
+    closeModal();
+    toast(data.message || "구매 완료");
+    await loadStore();
+  } catch (error) {
+    stopProgressPolling();
+    toast(apiErrorMessage(error, "구매 저장 실패"));
+    button.textContent = itemAction(selectedItem).label;
+    button.disabled = false;
+  }
+}
+
+function showProgress(progress) {
+  const progressEl = document.getElementById("modal-progress");
+  const bar = document.getElementById("progress-bar");
+  const label = document.getElementById("progress-label");
+  const percentEl = document.getElementById("progress-percent");
+  const percent = Number.isFinite(progress.percent) ? Math.max(0, Math.min(100, progress.percent)) : 0;
+
+  progressEl.classList.add("show");
+  bar.style.width = `${percent}%`;
+  label.textContent = progress.message || "다운로드 중";
+  percentEl.textContent = Number.isFinite(progress.percent) ? `${percent}%` : "-";
+}
+
+function hideProgress() {
+  document.getElementById("modal-progress").classList.remove("show");
+  document.getElementById("progress-bar").style.width = "0%";
+}
+
+function stopProgressPolling() {
+  if (progressTimer) {
+    clearInterval(progressTimer);
+    progressTimer = null;
+  }
+}
+
+function startProgressPolling(featureId) {
+  stopProgressPolling();
+  const poll = async () => {
+    try {
+      const response = await fetch(`/api/ota/progress/${featureId}`);
+      if (!response.ok) return;
+      const progress = await response.json();
+      showProgress(progress);
+    } catch {
+      // 진행률 표시는 보조 UI라서 요청 실패는 조용히 무시합니다.
+    }
+  };
+  poll();
+  progressTimer = setInterval(poll, 250);
+}
+
+function toast(message) {
+  const toastEl = document.getElementById("toast");
+  toastEl.textContent = message;
+  toastEl.classList.add("show");
+  setTimeout(() => toastEl.classList.remove("show"), 2200);
+}
+
+document.getElementById("confirm-button").addEventListener("click", confirmPurchase);
+document.getElementById("overlay").addEventListener("click", (event) => {
+  if (event.target.id === "overlay") closeModal();
+});
+
+loadStore();
+</script>
+</body>
+</html>

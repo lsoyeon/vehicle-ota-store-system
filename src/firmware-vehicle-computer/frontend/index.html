@@ -1,0 +1,1266 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart Vehicle Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;800&family=Noto+Sans+KR:wght@300;400;500;700&family=Nunito:wght@400;700;800;900&display=swap" rel="stylesheet">
+<style>
+/* ══════════════════════════════
+   테마 변수
+   ══════════════════════════════ */
+:root {
+  /* 기본 다크 */
+  --bg:#07090f; --panel:rgba(12,18,32,0.92); --panel2:rgba(16,24,42,0.88);
+  --border:rgba(255,255,255,0.07); --ba:rgba(0,200,255,0.22);
+  --ac:#00c8ff; --ac2:#00e5a0; --warn:#ff6b35; --red:#ff3355;
+  --tx:#ddeeff; --txs:rgba(180,210,240,0.55);
+  --glow:0 0 24px rgba(0,200,255,0.15); --r:16px;
+  --font-head:'Orbitron',sans-serif; --font-body:'Noto Sans KR',sans-serif;
+}
+[data-theme="light"]{
+  --bg:#edf2f7;--panel:rgba(255,255,255,.92);--panel2:rgba(240,246,255,.92);
+  --border:rgba(0,0,0,.06);--ba:rgba(0,120,180,.2);
+  --ac:#0070cc;--ac2:#00a06b;--tx:#0d1a2a;--txs:rgba(30,60,100,.5);
+  --glow:0 4px 20px rgba(0,120,180,.1);
+}
+[data-theme="blue"]{
+  --bg:#01050f;--panel:rgba(4,12,36,.95);--panel2:rgba(6,16,48,.9);
+  --border:rgba(80,140,255,.1);--ba:rgba(100,160,255,.28);
+  --ac:#6090ff;--ac2:#c060ff;--tx:#c8d8ff;--txs:rgba(160,190,255,.45);
+  --glow:0 0 28px rgba(80,140,255,.2);
+}
+
+/* ══════════════════════════════
+   리셋 & 기본
+   ══════════════════════════════ */
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;overflow:hidden}
+body{font-family:var(--font-body);background:var(--bg);color:var(--tx);height:100vh;transition:background .4s,color .4s}
+
+/* 배경 격자 (루피 테마에서 별 패턴으로) */
+body::before{
+  content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:linear-gradient(rgba(0,200,255,.025) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(0,200,255,.025) 1px,transparent 1px);
+  background-size:48px 48px;transition:.4s;
+}
+  background-image:radial-gradient(circle, rgba(200,120,220,.12) 1px, transparent 1px);
+  background-size:32px 32px;
+}
+
+.luffy-deco{display:none;position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden}
+.luffy-deco span{position:absolute;font-size:18px;opacity:.15;animation:float-deco 6s ease-in-out infinite;}
+.luffy-deco span:nth-child(1){top:8%;left:5%;animation-delay:0s}
+.luffy-deco span:nth-child(2){top:15%;right:8%;animation-delay:1s;font-size:14px}
+.luffy-deco span:nth-child(3){top:70%;left:3%;animation-delay:2s;font-size:22px}
+.luffy-deco span:nth-child(4){top:80%;right:5%;animation-delay:.5s;font-size:16px}
+.luffy-deco span:nth-child(5){top:45%;left:50%;animation-delay:3s;font-size:12px}
+.luffy-deco span:nth-child(6){top:25%;left:30%;animation-delay:1.5s;font-size:10px}
+@keyframes float-deco{0%,100%{transform:translateY(0) rotate(0deg)}50%{transform:translateY(-12px) rotate(10deg)}}
+
+.root{position:relative;z-index:1;display:flex;flex-direction:column;height:100vh;padding:11px;gap:9px}
+
+/* ══ 헤더 ══ */
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  background:var(--panel);border:1px solid var(--border);border-radius:13px;
+  padding:10px 18px;backdrop-filter:blur(16px);flex-shrink:0;
+  transition:background .4s,border-color .4s;
+}
+.logo{font-family:var(--font-head);font-size:11px;font-weight:700;color:var(--ac);letter-spacing:3px;transition:color .4s}
+.top-left{display:flex;align-items:center;gap:11px;min-width:0}
+.status-pills{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.net-pill{display:flex;align-items:center;gap:6px;padding:4px 11px;border-radius:20px;border:1px solid var(--border);font-size:11px;color:var(--txs);white-space:nowrap}
+.ndot{width:7px;height:7px;border-radius:50%;background:var(--red);transition:.3s}
+.ndot.ok{background:var(--ac2);animation:pg 2s infinite}
+.ndot.warn{background:var(--warn);box-shadow:0 0 8px var(--warn)}
+@keyframes pg{0%,100%{box-shadow:0 0 4px var(--ac2)}50%{box-shadow:0 0 10px var(--ac2)}}
+
+.hdr-center{text-align:center}
+.clock{font-family:var(--font-head);font-size:22px;font-weight:800;letter-spacing:2px;transition:color .4s}
+.dateline{font-size:10px;color:var(--txs);letter-spacing:1px;margin-top:1px}
+
+.storebtn{background:linear-gradient(135deg,var(--ac),var(--ac2));color:#fff;border:none;border-radius:11px;padding:8px 18px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font-body);transition:.2s;display:flex;align-items:center;gap:6px}
+.storebtn:hover{transform:translateY(-1px);box-shadow:0 4px 16px rgba(0,200,255,.3)}
+
+/* ══ 메인 ══ */
+.main{display:flex;gap:9px;flex:1;min-height:0}
+
+/* 1번: 왼쪽=기능관리, 중앙=속도+날씨(flex grow), 오른쪽=시스템상태 */
+.lcol{width:210px;flex-shrink:0}
+.ccol{flex:1;display:flex;flex-direction:column;gap:9px;min-width:0}
+.rcol{width:210px;flex-shrink:0}
+
+/* ══ 패널 공통 ══ */
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:var(--r);backdrop-filter:blur(16px);transition:background .4s,border-color .4s}
+.plabel{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--txs);margin-bottom:10px;display:flex;align-items:center;gap:6px}
+.plabel::before{content:'';display:block;width:3px;height:10px;background:var(--ac);border-radius:2px;transition:background .4s}
+
+/* ══ 왼쪽: 기능 관리 ══ */
+.fpanel{padding:14px 13px;height:100%;display:flex;flex-direction:column;gap:8px}
+.fempty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--txs);font-size:12px;text-align:center}
+.fempty-icon{font-size:28px;opacity:.4}
+.fcard{background:rgba(0,0,0,.18);border:1px solid var(--border);border-radius:11px;padding:10px 12px;transition:.25s}
+.fcard.on{border-color:rgba(0,229,160,.4);background:rgba(0,229,160,.05);box-shadow:0 0 10px rgba(0,229,160,.1)}
+.ftop{display:flex;align-items:center;justify-content:space-between;margin-bottom:5px}
+.fnamerow{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.ficon{font-size:14px}
+.fname{font-size:12px;font-weight:700}
+.fver{font-size:9px;color:var(--ac);background:rgba(0,200,255,.1);padding:1px 6px;border-radius:7px;border:1px solid rgba(0,200,255,.2)}
+.fver.pending{color:var(--txs);background:transparent;border-color:var(--border)}
+/* toggle */
+.tgl{position:relative;width:36px;height:20px;flex-shrink:0}
+.tgl input{display:none}
+.ttrack{position:absolute;inset:0;border-radius:10px;background:rgba(255,255,255,.08);border:1px solid var(--border);cursor:pointer;transition:.25s}
+.ttrack::after{content:'';position:absolute;top:3px;left:3px;width:12px;height:12px;border-radius:50%;background:var(--txs);transition:.25s}
+input:checked+.ttrack{background:rgba(0,229,160,.2);border-color:var(--ac2)}
+input:checked+.ttrack::after{left:19px;background:var(--ac2);box-shadow:0 0 6px var(--ac2)}
+input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
+.fstatus{font-size:10px;font-weight:600;color:var(--txs)}
+.fstatus.on{color:var(--ac2)}
+
+/* ══ 중앙: 속도 + 날씨 ══ */
+/* 1번: 창이 커지면 속도+날씨 커짐 */
+.speed-panel{padding:20px 18px;display:flex;flex-direction:column;align-items:center;box-shadow:var(--glow);flex-shrink:0}
+.gauge{position:relative;width:min(160px, 18vw);height:min(160px,18vw)}
+.gauge svg{width:100%;height:100%}
+.arc-bg{fill:none;stroke:rgba(255,255,255,.06);stroke-width:7}
+.arc-fill{fill:none;stroke:var(--ac);stroke-width:7;stroke-linecap:round;stroke-dasharray:220;stroke-dashoffset:220;transition:stroke-dashoffset .7s ease}
+.gauge-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding-top:10px}
+.snum{font-family:var(--font-head);font-size:clamp(28px,5vw,40px);font-weight:800;color:var(--ac);line-height:1;min-width:2ch;text-align:center;transition:color .3s}
+.sunit{font-size:9px;color:var(--txs);letter-spacing:2px}
+.dirbadge{margin-top:10px;padding:4px 16px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(0,200,255,.1);color:var(--ac);border:1px solid rgba(0,200,255,.22)}
+
+/* 날씨 */
+.wpanel{padding:14px 16px;flex:1;min-height:0}
+.wmain{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+.wicon{font-size:clamp(32px,4vw,42px);filter:drop-shadow(0 0 10px rgba(0,200,255,.25));line-height:1}
+.wtemp{font-family:var(--font-head);font-size:clamp(22px,3.5vw,30px);font-weight:800}
+.wunit{font-size:12px;color:var(--txs)}
+.wdesc{font-size:12px;color:var(--txs);margin-top:2px}
+.wgrid{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.wrow{font-size:10px;color:var(--txs);display:flex;align-items:center;gap:3px}
+.wrow span{color:var(--tx);font-weight:500}
+
+/* ══ 오른쪽: 시스템 상태 ══ */
+.syspanel{padding:14px 16px;height:100%;display:flex;flex-direction:column}
+.srow{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)}
+.srow:last-child{border-bottom:none}
+.slabel{font-size:11px;color:var(--txs)}
+.sval{font-size:11px;font-weight:600;color:var(--tx)}
+
+/* ══ 하단 바 ══ */
+.bottombar{display:flex;align-items:center;justify-content:space-between;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:8px 18px;backdrop-filter:blur(16px);flex-shrink:0;transition:background .4s}
+.thlabel{font-size:10px;color:var(--txs);letter-spacing:1px;text-transform:uppercase}
+.thbtns{display:flex;gap:5px}
+.tbtn{padding:4px 11px;border-radius:14px;border:1px solid var(--border);background:transparent;color:var(--txs);font-size:11px;cursor:pointer;transition:.2s;font-family:var(--font-body)}
+.tbtn:hover{color:var(--tx);border-color:var(--ac)}
+.tbtn.active{background:var(--ac);color:#000;border-color:var(--ac);font-weight:700}
+
+/* OTA 알림 배너 */
+#ota-banner{
+  position:fixed;bottom:-80px;left:50%;transform:translateX(-50%);
+  z-index:2500;width:min(92vw,480px);
+  background:var(--panel2);border:1px solid var(--ba);border-radius:14px;
+  padding:12px 18px;display:flex;align-items:center;gap:12px;
+  box-shadow:0 -4px 24px rgba(0,0,0,.3);backdrop-filter:blur(16px);
+  transition:bottom .4s cubic-bezier(.34,1.56,.64,1);
+}
+#ota-banner.show{bottom:16px}
+.ota-banner-icon{font-size:24px;flex-shrink:0}
+.ota-banner-text{flex:1}
+.ota-banner-title{font-size:13px;font-weight:700;color:var(--tx)}
+.ota-banner-sub{font-size:11px;color:var(--txs);margin-top:2px}
+.ota-banner-btn{background:linear-gradient(135deg,var(--ac),var(--ac2));color:#000;border:none;border-radius:9px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font-body);white-space:nowrap;flex-shrink:0}
+.ota-banner-dismiss{background:transparent;border:none;color:var(--txs);cursor:pointer;font-size:16px;padding:0 4px;flex-shrink:0}
+
+/* ══════════════════════════════
+   오버레이 모달
+   ══════════════════════════════ */
+.ov{position:fixed;inset:0;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;z-index:4000;opacity:0;pointer-events:none;transition:opacity .3s;backdrop-filter:blur(6px)}
+.ov.show{opacity:1;pointer-events:all}
+.modal{background:linear-gradient(160deg,#0c1828,#060d1c);border:1px solid var(--ba);border-radius:22px;padding:32px 28px;width:min(92vw,420px);box-shadow:0 0 60px rgba(0,200,255,.1),0 24px 60px rgba(0,0,0,.6);transform:scale(.93) translateY(16px);transition:transform .3s;text-align:center}
+.ov.show .modal{transform:scale(1) translateY(0)}
+.mbig{font-size:48px;display:block;margin-bottom:12px}
+.mtitle{font-family:var(--font-head);font-size:16px;font-weight:700;margin-bottom:5px;color:var(--tx)}
+.msub{font-size:12px;color:var(--txs);line-height:1.7;margin-bottom:18px}
+.otalist{display:flex;flex-direction:column;gap:7px;margin-bottom:18px;text-align:left}
+.otarow{display:flex;align-items:center;gap:9px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:10px;padding:9px 12px}
+.otarow-icon{font-size:18px;flex-shrink:0}
+.otarow-info{flex:1}
+.otarow-name{font-size:12px;font-weight:600;color:var(--tx)}
+.otarow-detail{font-size:10px;color:var(--txs);margin-top:1px}
+.obadge{font-size:9px;font-weight:700;padding:2px 8px;border-radius:7px;flex-shrink:0}
+.bi{background:rgba(0,200,255,.12);color:var(--ac);border:1px solid rgba(0,200,255,.3)}
+.bu{background:rgba(255,165,0,.12);color:#ffaa44;border:1px solid rgba(255,165,0,.3)}
+.bok{background:rgba(0,229,160,.12);color:var(--ac2);border:1px solid rgba(0,229,160,.3)}
+.bfail{background:rgba(255,50,80,.12);color:var(--red);border:1px solid rgba(255,50,80,.3)}
+.plog{font-size:11px;color:var(--txs);text-align:left;max-height:120px;overflow-y:auto;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:9px;padding:9px 11px;line-height:2}
+.pl{color:var(--txs)}.pl.done{color:var(--ac2)}
+.btnrow{display:flex;gap:9px;justify-content:center;margin-top:4px}
+.bpri{flex:2;padding:11px;border:none;border-radius:11px;background:linear-gradient(135deg,var(--ac),var(--ac2));color:#000;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font-body);transition:.2s}
+.bpri:hover{transform:translateY(-1px)}
+.bsec{flex:1;padding:11px;border-radius:11px;background:transparent;border:1px solid var(--border);color:var(--txs);font-size:13px;cursor:pointer;font-family:var(--font-body);transition:.2s}
+.bsec:hover{border-color:var(--tx);color:var(--tx)}
+
+/* AEB */
+.aeb-ov{position:fixed;inset:0;z-index:9000;background:rgba(255,30,30,.12);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none}
+.aeb-ov.show{animation:aebf .4s forwards,aebfade 3s .7s forwards}
+@keyframes aebf{0%,20%,40%,60%,80%{background:rgba(255,30,30,.4)}10%,30%,50%,70%,90%{background:rgba(255,30,30,.04)}100%{opacity:1;background:rgba(255,30,30,.1)}}
+@keyframes aebfade{0%{opacity:1}100%{opacity:0;pointer-events:none}}
+.aeb-box{background:rgba(8,0,0,.95);border:2px solid var(--red);border-radius:20px;padding:30px 42px;text-align:center;box-shadow:0 0 60px rgba(255,30,30,.5)}
+.aeb-icon{font-size:56px;display:block;margin-bottom:10px;animation:aebp .45s ease-in-out 5}
+@keyframes aebp{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
+.aeb-title{font-family:var(--font-head);font-size:24px;font-weight:800;color:var(--red);letter-spacing:3px;text-shadow:0 0 20px rgba(255,50,50,.8);margin-bottom:5px}
+.aeb-sub{font-size:12px;color:rgba(255,150,150,.8)}
+
+/* 루피 슬라이드인 알림 */
+.luffy-notif{position:fixed;top:68px;right:14px;z-index:800;width:280px;transform:translateX(300px);transition:transform .45s cubic-bezier(.34,1.56,.64,1)}
+.luffy-notif.show{transform:translateX(0)}
+.lcard{background:linear-gradient(135deg,rgba(10,20,40,.97),rgba(6,12,28,.97));border:1px solid var(--ba);border-radius:15px;padding:14px;box-shadow:var(--glow),0 8px 32px rgba(0,0,0,.5);backdrop-filter:blur(20px);position:relative;overflow:hidden}
+.lcard::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:linear-gradient(180deg,var(--ac),var(--ac2));border-radius:15px 0 0 15px}
+.lhdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}
+.lbadge{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--ac);padding:2px 8px;border-radius:7px;background:rgba(0,200,255,.12);border:1px solid rgba(0,200,255,.25)}
+.lclose{background:transparent;border:none;color:var(--txs);cursor:pointer;font-size:13px;padding:2px 5px}
+.lclose:hover{color:var(--tx)}
+.litems{display:flex;flex-direction:column;gap:7px;margin-bottom:10px}
+.litem{display:flex;align-items:center;gap:9px}
+.liicon{width:32px;height:32px;border-radius:9px;background:rgba(0,200,255,.1);border:1px solid rgba(0,200,255,.2);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+.liname{font-size:12px;font-weight:700;color:var(--tx)}
+.lidesc{font-size:10px;color:var(--txs);margin-top:1px}
+.lactbtn{background:linear-gradient(135deg,var(--ac),var(--ac2));color:#000;border:none;border-radius:9px;padding:7px;font-size:11px;font-weight:700;cursor:pointer;width:100%;font-family:var(--font-body);transition:.2s}
+.lactbtn:hover{opacity:.9;transform:translateY(-1px)}
+.lpbar{position:absolute;bottom:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--ac),var(--ac2));transform-origin:left}
+.luffy-notif.show .lpbar{animation:lshrink 5s linear .5s forwards}
+@keyframes lshrink{from{transform:scaleX(1)}to{transform:scaleX(0)}}
+
+/* 시연 패널 */
+.demo-bar{position:fixed;bottom:14px;right:14px;display:flex;gap:6px;z-index:500;flex-direction:column;align-items:flex-end}
+.demo-toggle{background:rgba(255,255,255,.07);border:1px solid var(--border);color:var(--txs);border-radius:20px;padding:5px 12px;font-size:10px;cursor:pointer;font-family:var(--font-body);transition:.2s}
+.demo-toggle:hover{color:var(--tx);border-color:var(--ac)}
+.demo-panel{background:var(--panel2);border:1px solid var(--ba);border-radius:13px;padding:11px;display:none;flex-direction:column;gap:6px;min-width:175px}
+.demo-panel.open{display:flex}
+.dbtn{background:transparent;border:1px solid var(--border);color:var(--txs);border-radius:8px;padding:6px 11px;font-size:11px;cursor:pointer;font-family:var(--font-body);text-align:left;transition:.15s}
+.dbtn:hover{border-color:var(--ac);color:var(--ac)}
+.dsec{font-size:9px;color:var(--txs);letter-spacing:1px;padding:3px 0 1px;border-top:1px solid var(--border);margin-top:2px}
+.wide-modal{width:min(94vw,820px);padding:20px;text-align:left}
+.modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.modal-title{font-family:var(--font-head);font-size:14px;font-weight:700;color:var(--tx)}
+.icon-btn{width:30px;height:30px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--txs);cursor:pointer;font-size:16px}
+.icon-btn:hover{border-color:var(--ac);color:var(--tx)}
+.term-box{height:min(54vh,440px);background:#02050a;border:1px solid rgba(0,200,255,.22);border-radius:10px;padding:10px;overflow:auto;font:12px/1.55 Consolas,monospace;color:#cfefff;white-space:pre-wrap}
+.term-box .err{color:#ff8a9a}
+.term-input-row{display:flex;gap:8px;margin-top:10px}
+.term-input{flex:1;background:rgba(0,0,0,.38);border:1px solid var(--border);border-radius:9px;color:var(--tx);padding:10px;font:12px Consolas,monospace;outline:none}
+.term-send{width:70px;border:none;border-radius:9px;background:linear-gradient(135deg,var(--ac),var(--ac2));color:#001018;font-weight:800;cursor:pointer}
+.flash-grid{display:grid;grid-template-columns:160px 1fr;gap:10px;align-items:center}
+.flash-label{font-size:11px;color:var(--txs)}
+.flash-select,.flash-file{width:100%;background:rgba(0,0,0,.28);border:1px solid var(--border);border-radius:9px;color:var(--tx);padding:9px;font-size:12px}
+.flash-actions{display:flex;gap:9px;justify-content:flex-end;margin-top:14px}
+.flash-progress{margin-top:12px;background:rgba(0,0,0,.28);border:1px solid var(--border);border-radius:9px;overflow:hidden}
+.flash-bar{height:7px;background:linear-gradient(90deg,var(--ac),var(--ac2));width:0%;transition:width .2s}
+.flash-log{margin-top:8px;min-height:42px;color:var(--txs);font-size:11px;line-height:1.6;white-space:pre-wrap}
+
+/* toast */
+#toast{position:fixed;bottom:58px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--panel);border:1px solid var(--ac);color:var(--tx);padding:9px 20px;border-radius:24px;font-size:12px;opacity:0;transition:.3s;pointer-events:none;backdrop-filter:blur(16px);z-index:9999;white-space:nowrap}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="root" id="root">
+
+  <!-- ══ 헤더 ══ -->
+  <div class="topbar">
+    <div class="top-left">
+      <div class="logo" id="logo-text">SMART VEHICLE</div>
+      <div class="status-pills">
+        <div class="net-pill"><div class="ndot" id="ndot"></div><span id="nlabel">인터넷 확인 중...</span></div>
+        <div class="net-pill"><div class="ndot" id="vcdot"></div><span id="vclabel">Vehicle Computer 확인 중...</span></div>
+      </div>
+    </div>
+    <div class="hdr-center">
+      <div class="clock" id="clock">--:--:--</div>
+      <div class="dateline" id="dateline">----.--.-- (---)</div>
+    </div>
+    <button class="storebtn" onclick="goStore()">🛒 스토어</button>
+  </div>
+
+  <!-- ══ 메인: 기능관리 | 속도+날씨 | 시스템상태 ══ -->
+  <div class="main">
+
+    <!-- 왼쪽: 기능 관리 -->
+    <div class="lcol">
+      <div class="panel fpanel" style="height:100%">
+        <div class="plabel">기능 관리</div>
+        <div class="fempty" id="fempty">
+          <div class="fempty-icon">📦</div>
+          <div id="fempty-text">구매한 기능이 없습니다.</div>
+          <button class="storebtn" style="font-size:11px;padding:6px 14px;border-radius:10px" onclick="goStore()">🛒 스토어</button>
+        </div>
+        <div id="fcards" style="display:none;flex-direction:column;gap:7px;flex:1;overflow-y:auto"></div>
+      </div>
+    </div>
+
+    <!-- 중앙: 속도 + 날씨 (flex grow, 창 커지면 커짐) -->
+    <div class="ccol">
+      <div class="panel speed-panel">
+        <div class="gauge">
+          <svg viewBox="0 0 120 120">
+            <path class="arc-bg" d="M18,92 A50,50 0 1,1 102,92"/>
+            <path class="arc-fill" id="sarc" d="M18,92 A50,50 0 1,1 102,92"/>
+          </svg>
+          <div class="gauge-center">
+            <div class="snum" id="snum">0.0</div>
+            <div class="sunit">KM/H</div>
+          </div>
+        </div>
+        <div class="dirbadge" id="dirbadge">정지</div>
+      </div>
+
+      <!-- 날씨 -->
+      <div class="panel wpanel">
+        <div class="plabel">날씨 · 서울</div>
+        <div class="wmain">
+          <div class="wicon" id="wicon">⏳</div>
+          <div>
+            <div style="display:flex;align-items:baseline;gap:2px">
+              <div class="wtemp" id="wtemp">--</div><div class="wunit">°C</div>
+            </div>
+            <div class="wdesc" id="wdesc">불러오는 중...</div>
+          </div>
+        </div>
+        <div class="wgrid">
+          <div class="wrow">💧 습도 <span id="whum">--%</span></div>
+          <div class="wrow">💨 바람 <span id="wwind">--</span></div>
+          <div class="wrow">🌡️ 체감 <span id="wfeel">--°C</span></div>
+          <div class="wrow">👁️ 가시 <span id="wvis">-- km</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 오른쪽: 시스템 상태 -->
+    <div class="rcol">
+      <div class="panel syspanel">
+        <div class="plabel">시스템 상태</div>
+        <div style="flex:1;display:flex;flex-direction:column">
+          <div class="srow"><span class="slabel">인터넷</span><span class="sval" id="ss-internet" style="font-size:10px">-</span></div>
+          <div class="srow"><span class="slabel">Vehicle Computer 연결</span><span class="sval" id="ss-vehicle-link" style="font-size:10px">-</span></div>
+          <div class="srow"><span class="slabel">구매 기능</span><span class="sval" id="ss-pur">-</span></div>
+          <div class="srow"><span class="slabel">Vehicle Computer FW</span><span class="sval" id="ss-fw-vehicle-computer">-</span></div>
+          <div class="srow"><span class="slabel">ZCU FW</span><span class="sval" id="ss-fw-zcu">-</span></div>
+          <div class="srow"><span class="slabel">AEB SW</span><span class="sval" id="ss-fw-aeb">-</span></div>
+          <div class="srow"><span class="slabel">모터 ECU</span><span class="sval" id="ss-fw-motor">-</span></div>
+          <div class="srow"><span class="slabel">센서 ECU</span><span class="sval" id="ss-fw-sensor">-</span></div>
+          <div class="srow"><span class="slabel">카메라 ECU</span><span class="sval" id="ss-fw-camera">-</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ══ 하단: 테마 선택 ══ -->
+  <div class="bottombar">
+    <div class="thlabel">테마</div>
+    <div class="thbtns">
+      <button class="tbtn active" id="t-dark"  onclick="setTheme('dark')">다크</button>
+      <button class="tbtn" id="t-light" onclick="setTheme('light')">라이트</button>
+      <button class="tbtn" id="t-blue"  onclick="setTheme('blue')">블루</button>
+      <button class="tbtn" id="t-luffy" onclick="setTheme('luffy')" style="display:none">🐾 루피</button>
+    </div>
+    <div style="font-size:10px;color:var(--txs)" id="lastsync">--</div>
+  </div>
+
+</div>
+
+<!-- ══ 루피 배경 장식 ══ -->
+<div class="luffy-deco">
+  <span>⭐</span><span>💜</span><span>🐾</span><span>✨</span><span>💫</span><span>🌸</span>
+</div>
+
+<!-- ══ OTA 알림 배너 ══ -->
+<div id="ota-banner">
+  <div class="ota-banner-icon">⚙️</div>
+  <div class="ota-banner-text">
+    <div class="ota-banner-title" id="ota-banner-title">업데이트 항목이 있습니다</div>
+    <div class="ota-banner-sub" id="ota-banner-sub">기어를 P단으로 바꾸면 자동 업데이트가 진행됩니다</div>
+  </div>
+  <button class="ota-banner-btn" onclick="showOtaConfirm()">확인</button>
+  <button class="ota-banner-dismiss" id="ota-banner-dismiss" onclick="dismissBanner()">✕</button>
+</div>
+
+<!-- ══ 4번: OTA 업데이트 확인 모달 ══ -->
+<div class="ov" id="ov-ota-confirm">
+  <div class="modal">
+    <span class="mbig">📋</span>
+    <div class="mtitle" id="ota-modal-title">업데이트 목록</div>
+    <div class="msub">아래 항목의 업데이트가 있습니다.<br>기어를 P단으로 바꾸면 자동으로 업데이트됩니다.</div>
+    <div class="otalist" id="ota-confirm-list"></div>
+    <div class="btnrow">
+      <button class="bsec" id="ota-later-btn" onclick="otaDecision(false)">다음에</button>
+      <button class="bpri" onclick="otaDecision(true)">지금 업데이트</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ OTA 진행 ══ -->
+<div class="ov" id="ov-ota-prog">
+  <div class="modal">
+    <span class="mbig" style="display:inline-block;animation:spin 1.2s linear infinite">⚙️</span>
+    <div class="mtitle">업데이트 중...</div>
+    <div class="msub">P단 상태에서 업데이트 중입니다.</div>
+    <div class="plog" id="proglog"></div>
+  </div>
+</div>
+
+<!-- ══ 부팅 결과 ══ -->
+<div class="ov" id="ov-boot-result">
+  <div class="modal">
+    <span class="mbig" id="boot-icon">✅</span>
+    <div class="mtitle" id="boot-title">업데이트 완료</div>
+    <div class="msub" id="boot-sub"></div>
+    <div class="otalist" id="boot-list"></div>
+    <div class="btnrow"><button class="bpri" onclick="closeOv('ov-boot-result')">확인</button></div>
+  </div>
+</div>
+
+<!-- ══ AEB ══ -->
+<div class="aeb-ov" id="aebov">
+  <div class="aeb-box">
+    <span class="aeb-icon">🚨</span>
+    <div class="aeb-title">긴급 제동</div>
+    <div class="aeb-sub">AEB 자동 긴급 제동 시스템 작동</div>
+  </div>
+</div>
+
+<!-- ══ 루피 알림 ══ -->
+<div class="luffy-notif" id="luffy-notif">
+  <div class="lcard">
+    <div class="lpbar"></div>
+    <div class="lhdr">
+      <div class="lbadge">NEW IN STORE</div>
+      <button class="lclose" onclick="closeLuffy()">✕</button>
+    </div>
+    <div class="litems" id="litems"></div>
+    <button class="lactbtn" onclick="goStore();closeLuffy()">스토어에서 보기 →</button>
+  </div>
+</div>
+
+<!-- ══ 시연 패널 ══ -->
+<div class="demo-bar">
+  <button class="demo-toggle" onclick="toggleDemo()">🔧 시연</button>
+  <div class="demo-panel" id="demopanel">
+    <div style="font-size:9px;color:var(--txs);letter-spacing:1px">DEMO CONTROLS</div>
+    <div class="dsec">기능 알림</div>
+    <button class="dbtn" onclick="demoNewFeature()">🆕 새 기능 스토어 등록 알림</button>
+    <button class="dbtn" onclick="demoVersionUpdate()">⬆️ 버전 업데이트 배너</button>
+    <button class="dbtn" onclick="checkLatestVersions()">최신버전 확인</button>
+    <div class="dsec">안전</div>
+    <button class="dbtn" onclick="demoAEB()">🚨 AEB 긴급 제동</button>
+    <div class="dsec">설정</div>
+    <button class="dbtn" onclick="openDebugTerminal()">Debug Terminal</button>
+    <button class="dbtn" onclick="openFlasher()">Manual Flasher</button>
+    <button class="dbtn" onclick="demoResetSettings()">🧹 설정 파일 초기화</button>
+  </div>
+</div>
+
+<div class="ov" id="ov-debug-terminal">
+  <div class="modal wide-modal">
+    <div class="modal-head">
+      <div class="modal-title">DEBUG TERMINAL</div>
+      <button class="icon-btn" onclick="closeDebugTerminal()">×</button>
+    </div>
+    <div class="term-box" id="termout"></div>
+    <div class="term-input-row">
+      <input class="term-input" id="terminput" autocomplete="off" spellcheck="false" placeholder="PowerShell command">
+      <button class="term-send" onclick="sendTermCommand()">SEND</button>
+    </div>
+  </div>
+</div>
+
+<div class="ov" id="ov-flasher">
+  <div class="modal wide-modal">
+    <div class="modal-head">
+      <div class="modal-title">MANUAL FLASHER</div>
+      <button class="icon-btn" onclick="closeOv('ov-flasher')">×</button>
+    </div>
+    <div class="flash-grid">
+      <div class="flash-label">Target board</div>
+      <select class="flash-select" id="flash-board"></select>
+      <div class="flash-label">Binary file</div>
+      <input class="flash-file" id="flash-file" type="file" accept=".bin,application/octet-stream">
+    </div>
+    <div class="flash-actions">
+      <button class="bsec" onclick="closeOv('ov-flasher')">Close</button>
+      <button class="bpri" onclick="startManualFlash()">Flash</button>
+    </div>
+    <div class="flash-progress"><div class="flash-bar" id="flash-bar"></div></div>
+    <div class="flash-log" id="flash-log">Idle</div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* ════════════════════════
+   상수
+   ════════════════════════ */
+const CATALOG = [
+  {id:'LKAS', name:'LKAS', full:'차선 유지 보조', icon:'🛣️'},
+  {id:'AEB',  name:'AEB',  full:'자동 긴급 제동', icon:'🛑'},
+  {id:'FVSA', name:'FVSA', full:'앞차 출발 알림', icon:'🔔'},
+];
+
+const VERSION_LABELS = {Feature:'기능', VehicleComputer:'Vehicle Computer'};
+
+// {"Feature": "1.1.0", "SensorECU": "1.0.0"} -> "기능: v1.1.0 / SensorECU: v1.0.0"
+function fmtVerObj(verObj) {
+  if (!verObj || typeof verObj !== 'object') return null;
+  const entries = Object.entries(verObj);
+  if (entries.length === 0) return null;
+  return entries.map(([t, v]) => `${VERSION_LABELS[t] || t}: v${v}`).join(' / ');
+}
+
+function fmtFeatureVersion(fid, verObj) {
+  if (!verObj || typeof verObj !== 'object') return null;
+  const version = verObj.Feature || verObj[fid] || verObj.VehicleComputer;
+  return version ? `v${version}` : null;
+}
+const DAYS = ['일','월','화','수','목','금','토'];
+
+let curTheme = 'dark';
+let luffyShown = false;
+let pendingOtaData = null;
+let pendingOtaKey = null;
+let dismissedOtaKey = null;
+let aebAlarmVisible = false;
+let ws;
+let debugTermWs = null;
+let flashPollTimer = null;
+
+/* ════════════════════════
+   WebSocket
+   ════════════════════════ */
+function connectWS() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = e => { try { dispatch(JSON.parse(e.data)); } catch(ex){ console.error(ex); } };
+  ws.onerror = () => {
+    setInternet({status:'checking'});
+    setVehicleLink({status:'disconnected'});
+  };
+  ws.onclose = () => setTimeout(connectWS, 3000);
+}
+
+function dispatch(d) {
+  switch(d.type) {
+    case 'status':            updateDash(d); break;
+    case 'ota_started':       showOv('ov-ota-prog'); document.getElementById('proglog').innerHTML=''; break;
+    case 'ota_progress':      appendLog(d); break;
+    case 'ota_done':          closeOv('ov-ota-prog'); toast(d.result.all_success?'✅ 업데이트 완료':'⚠️ 일부 실패'); break;
+    case 'ota_skipped':       closeOv('ov-ota-confirm'); break;
+    case 'ota_result_on_boot': showBootResult(d.result); break;
+    case 'aeb_triggered':     triggerAEB(); break;
+    case 'new_store_item':      onNewStoreItem(d.items); break;
+    case 'theme_download_start': onThemeDownload(d); break;
+    default: if(d.speed!==undefined) updateDash(d);
+  }
+}
+
+/* ════════════════════════
+   시계 (매초 로컬 업데이트 — 레이아웃 안 바뀜)
+   ════════════════════════ */
+function updateClock() {
+  const now = new Date();
+  const hms = now.toTimeString().slice(0,8);
+  // 7번: 날짜 + 요일
+  const dateStr = `${now.getFullYear()}.${String(now.getMonth()+1).padStart(2,'0')}.${String(now.getDate()).padStart(2,'0')} (${DAYS[now.getDay()]})`;
+  document.getElementById('clock').textContent = hms;
+  document.getElementById('dateline').textContent = dateStr;
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+/* ════════════════════════
+   대시보드 업데이트
+   ════════════════════════ */
+function updateDash(d) {
+  if(!d.time) return;
+
+  // 속도 (Orbitron 고정폭으로 레이아웃 안 튐)
+  const spd = Number(d.speed || 0);
+  document.getElementById('snum').textContent = spd.toFixed(1);
+  document.getElementById('dirbadge').textContent = d.direction || '정지';
+  const arc = document.getElementById('sarc');
+  arc.style.strokeDashoffset = 220 * (1 - Math.min(spd/60,1));
+  arc.style.stroke = spd > 40 ? 'var(--warn)' : 'var(--ac)';
+
+  // 네트워크
+  const internet = d.network?.internet || {status: d.network?.status || 'checking'};
+  const vehicleLink = d.network?.vehicle_computer || {status: 'disconnected'};
+  setInternet(internet);
+  setVehicleLink(vehicleLink);
+  document.getElementById('ss-internet').textContent = internetText(internet);
+  document.getElementById('ss-vehicle-link').textContent = vehicleLinkText(vehicleLink);
+
+  // 시스템
+  const pur = d.purchased||[];
+  document.getElementById('ss-pur').textContent = `${pur.length}개`;
+  const fw = d.firmware_versions || {};
+  document.getElementById('ss-fw-vehicle-computer').textContent = fw.VehicleComputer || '-';
+  document.getElementById('ss-fw-zcu').textContent = fw.ZCU || '-';
+  document.getElementById('ss-fw-aeb').textContent = fw.AEB || '-';
+  document.getElementById('ss-fw-motor').textContent = fw.MotorECU || '-';
+  document.getElementById('ss-fw-sensor').textContent = fw.SensorECU || '-';
+  document.getElementById('ss-fw-camera').textContent = fw.CameraECU || '-';
+  document.getElementById('lastsync').textContent = `동기화 ${d.time}`;
+
+  // 기능 카드
+  renderCards(d);
+
+  // 테마
+  if(d.ui_theme && d.ui_theme !== curTheme) applyTheme(d.ui_theme);
+  // 루피 버튼: 실제로 CSS 파일이 로컬에 존재할 때만 표시
+  // (구매 + 다운로드 완료 = available_themes에 포함됨)
+  const luffyAvailable = (d.available_themes||[]).includes('luffy');
+  const luffyBtn = document.getElementById('t-luffy');
+  if(luffyBtn) luffyBtn.style.display = luffyAvailable ? '' : 'none';
+
+  const ota = d.pending_ota || {};
+  const otaItems = [...(ota.to_install || []), ...(ota.to_update || [])];
+  if(otaItems.length) {
+    const key = otaItems.map(i=>`${i.feature_id}:${i.ecu_target||i.target}:${i.ota_kind||''}:${i.update_scope||''}:${i.latest_version}`).join('|');
+    pendingOtaData = ota;
+    pendingOtaKey = key;
+    const mandatory = isMandatoryAebZcuOta(ota);
+    setOtaMandatoryUi(mandatory);
+    if(mandatory || key !== dismissedOtaKey) {
+      const first = otaItems[0];
+      const installCount = otaItems.filter(i=>i.install_required || i.ota_kind === 'initial_install').length;
+      document.getElementById('ota-banner-title').textContent = installCount
+        ? `설치 대기 ${installCount}건이 있습니다`
+        : `업데이트 ${otaItems.length}건이 있습니다`;
+      document.getElementById('ota-banner-sub').textContent =
+        `${first.name || first.feature_id} ${first.ecu_target || 'ZCU'}: v${first.current_version || '0.0.0'} → v${first.latest_version}`;
+      showBanner();
+    }
+  } else {
+    pendingOtaData = null;
+    pendingOtaKey = null;
+    dismissedOtaKey = null;
+    setOtaMandatoryUi(false);
+    dismissBanner(false);
+  }
+
+  if(d.aeb_triggered && !aebAlarmVisible) {
+    aebAlarmVisible = true;
+    triggerAEB();
+    setTimeout(()=>{ aebAlarmVisible = false; }, 4200);
+  }
+}
+
+/* ════════════════════════
+   기능 카드
+   ════════════════════════ */
+function renderCards(d) {
+  const pur = d.purchased||[], inst = d.installed||[], active = d.active||{}, vers = d.versions||{};
+  const empty = document.getElementById('fempty');
+  const cards = document.getElementById('fcards');
+
+  if(pur.length === 0) {
+    empty.style.display = 'flex'; cards.style.display = 'none'; return;
+  }
+  empty.style.display = 'none'; cards.style.display = 'flex';
+  cards.innerHTML = '';
+
+  pur.forEach(fid => {
+    const m = CATALOG.find(c=>c.id===fid); if(!m) return;
+    const isOn = active[fid]??false;
+    const verObj = vers[fid];
+    const installed = inst.includes(fid);
+    const verStr = fmtFeatureVersion(fid, verObj);
+    const verTag = verStr
+      ? `<span class="fver">${verStr}</span>`
+      : `<span class="fver pending">아직 미설치</span>`;
+
+    const div = document.createElement('div');
+    div.className = 'fcard'+(isOn?' on':'');
+    div.innerHTML = `
+      <div class="ftop">
+        <div class="fnamerow">
+          <span class="ficon">${m.icon}</span>
+          <span class="fname">${m.name}</span>
+          ${verTag}
+        </div>
+        <label class="tgl">
+          <input type="checkbox" ${isOn?'checked':''} ${!installed?'disabled':''}
+            onchange="toggleFeat('${fid}',this)">
+          <div class="ttrack"></div>
+        </label>
+      </div>
+      <div class="fstatus ${isOn?'on':''}">${!installed?'아직 미설치':isOn?'✓ 활성화':'비활성화'}</div>`;
+    cards.appendChild(div);
+  });
+}
+
+/* ════════════════════════
+   토글
+   ════════════════════════ */
+async function toggleFeat(fid, cb) {
+  cb.disabled = true;
+  try {
+    const r = await fetch('/api/features/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({feature_id:fid})});
+    const d = await r.json(); toast(d.message||d.detail);
+  } catch { toast('서버 오류'); } finally { cb.disabled = false; }
+}
+
+/* ════════════════════════
+   날씨 (Open-Meteo)
+   ════════════════════════ */
+async function loadWeather() {
+  try {
+    const r = await fetch('/api/weather');
+    const d = await r.json(); const c = d.current;
+    document.getElementById('wtemp').textContent = Math.round(c.temperature_2m);
+    document.getElementById('wfeel').textContent = `${Math.round(c.apparent_temperature)}°C`;
+    document.getElementById('whum').textContent = `${c.relative_humidity_2m}%`;
+    document.getElementById('wwind').textContent = `${c.wind_speed_10m} km/h`;
+    document.getElementById('wvis').textContent = `${Math.round((c.visibility||10000)/1000)} km`;
+    const {icon,desc} = wmo(c.weather_code);
+    document.getElementById('wicon').textContent = icon;
+    document.getElementById('wdesc').textContent = desc;
+  } catch { document.getElementById('wdesc').textContent = '날씨 정보 없음'; }
+}
+function wmo(c){
+  if(c===0)return{icon:'☀️',desc:'맑음'};if(c<=2)return{icon:'⛅',desc:'구름 조금'};
+  if(c<=3)return{icon:'☁️',desc:'흐림'};if(c<=49)return{icon:'🌫️',desc:'안개'};
+  if(c<=59)return{icon:'🌦️',desc:'이슬비'};if(c<=69)return{icon:'🌧️',desc:'비'};
+  if(c<=79)return{icon:'🌨️',desc:'눈'};if(c<=82)return{icon:'🌧️',desc:'소나기'};
+  if(c<=99)return{icon:'⛈️',desc:'뇌우'};return{icon:'🌡️',desc:'-'};
+}
+
+/* ════════════════════════
+   네트워크 / 유틸
+   ════════════════════════ */
+function setDotState(dot, status) {
+  dot.classList.toggle('ok', status === 'connected');
+  dot.classList.toggle('warn', status === 'transmitting' || status === 'checking');
+}
+
+function setInternet(state = {}) {
+  const status = state.status || 'checking';
+  setDotState(document.getElementById('ndot'), status);
+  document.getElementById('nlabel').textContent =
+    status === 'connected' ? '인터넷 연결' :
+    status === 'checking' ? '인터넷 확인 중' :
+    '인터넷 미연결';
+}
+
+function setVehicleLink(state = {}) {
+  const status = state.status || 'disconnected';
+  setDotState(document.getElementById('vcdot'), status);
+  document.getElementById('vclabel').textContent =
+    status === 'connected' ? 'Vehicle Computer 연결' :
+    status === 'transmitting' ? 'Vehicle Computer 송신 중' :
+    'Vehicle Computer 미수신';
+}
+
+function internetText(state = {}) {
+  const status = state.status || 'checking';
+  if (status === 'connected') {
+    return Number.isFinite(state.latency_ms) ? `${state.host || '8.8.8.8'} · ${state.latency_ms}ms` : `${state.host || '8.8.8.8'} · OK`;
+  }
+  if (status === 'checking') return `${state.host || '8.8.8.8'} · 확인 중`;
+  return `${state.host || '8.8.8.8'} · 오프라인`;
+}
+
+function vehicleLinkText(state = {}) {
+  if (state.status === 'connected') {
+    if (state.source === 'event' && state.last_event) return `수신 · ${state.last_event}`;
+    if (state.source === 'firmware' && state.last_version_target) return `응답 · ${state.last_version_target}`;
+    return '연결';
+  }
+  if (state.status === 'transmitting') return '송신 중 · 응답 대기';
+  return '미수신';
+}
+
+/* ════════════════════════
+   테마
+   ════════════════════════ */
+async function setTheme(t) {
+  // 루피 테마: CSS 파일 실제 존재 여부 먼저 확인
+  if(t === 'luffy') {
+    const r = await fetch(`/api/theme-available/luffy`);
+    const d = await r.json();
+    if(!d.available) {
+      toast('⚠️ 루피 테마 파일이 없습니다. 스토어에서 먼저 구매하세요.');
+      return;
+    }
+  }
+  applyTheme(t);
+  try {
+    await fetch('/api/theme',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})});
+  } catch(e) { console.warn('theme save failed', e); }
+}
+function applyTheme(t) {
+  curTheme = t;
+  // 루피 테마: 외부에서 다운받은 CSS 파일이 있으면 동적으로 로드
+  if(t === 'luffy') {
+    loadThemeCss('luffy');
+  }
+  document.body.setAttribute('data-theme',t);
+  document.getElementById('root').setAttribute('data-theme',t);
+  ['dark','light','blue','luffy'].forEach(n=>document.getElementById(`t-${n}`)?.classList.toggle('active',n===t));
+
+  if(t==='luffy'){
+    document.getElementById('logo-text').textContent = '🐾 잔망루피';
+    document.getElementById('fempty-text').textContent = '구매한 기능이 없어요 🥺';
+  } else {
+    document.getElementById('logo-text').textContent = 'SMART VEHICLE';
+    document.getElementById('fempty-text').textContent = '구매한 기능이 없습니다.';
+  }
+}
+
+/**
+ * 외부 서버에서 다운로드된 테마 CSS를 동적으로 <link>로 삽입.
+ * Vehicle Computer server.py가 /themes/{id}.css 로 파일을 서빙함.
+ * (외부 서버가 Vehicle Computer로 전달 -> Vehicle Computer가 /static/themes/로 노출)
+ */
+function loadThemeCss(themeId) {
+  const existingId = `theme-css-${themeId}`;
+  if(document.getElementById(existingId)) return; // 이미 로드됨
+
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.id = existingId;
+  link.href = `/themes/${themeId}.css?v=${Date.now()}`;
+  link.onerror = () => {
+    // CSS 파일이 없으면 테마 적용 불가 - 다크로 복귀
+    console.error(`[테마] /themes/${themeId}.css 없음 — 테마 파일을 먼저 구매하세요`);
+    toast('⚠️ 테마 파일 없음. 스토어에서 구매 후 다시 시도하세요.');
+    // 다크 테마로 복귀
+    document.body.removeAttribute('data-theme');
+    document.getElementById('root').removeAttribute('data-theme');
+    fetch('/api/theme',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:'dark'})}).catch(()=>{});
+    document.getElementById(existingId)?.remove();
+  };
+  document.head.appendChild(link);
+}
+
+function onThemeDownload(d) {
+  toast(`⬇️ ${d.message}`, 3000);
+}
+
+function otaItems(pending=pendingOtaData) {
+  if(!pending) return [];
+  return [...(pending.to_install || []), ...(pending.to_update || [])];
+}
+
+function isMandatoryAebZcuOta(pending=pendingOtaData) {
+  return otaItems(pending).some(item => {
+    const targets = Array.isArray(item.targets) ? item.targets.join(',') : (item.targets || '');
+    const initialInstall = item.install_required || item.ota_kind === 'initial_install' || (pending?.to_install || []).includes(item);
+    return (item.feature_id || item.id) === 'AEB' &&
+      Boolean(initialInstall) &&
+      String(item.ecu_target || item.target || targets).toLowerCase().includes('zcu');
+  });
+}
+
+function setOtaMandatoryUi(mandatory) {
+  const dismiss = document.getElementById('ota-banner-dismiss');
+  const later = document.getElementById('ota-later-btn');
+  if(dismiss) dismiss.hidden = mandatory;
+  if(later) {
+    later.hidden = mandatory;
+    later.disabled = mandatory;
+  }
+}
+
+function showBanner() { document.getElementById('ota-banner').classList.add('show'); }
+function dismissBanner(snooze=true) {
+  if(snooze && isMandatoryAebZcuOta()) {
+    showBanner();
+    toast('AEB ZCU 업데이트는 건너뛸 수 없습니다.');
+    return;
+  }
+  document.getElementById('ota-banner').classList.remove('show');
+  if(snooze && pendingOtaKey) dismissedOtaKey = pendingOtaKey;
+}
+
+function showOtaConfirm() {
+  dismissBanner(false);
+  if(!pendingOtaData) return;
+  setOtaMandatoryUi(isMandatoryAebZcuOta());
+  const items = otaItems();
+  const hasInitialInstall = items.some(item=>item.install_required || item.ota_kind === 'initial_install');
+  document.getElementById('ota-modal-title').textContent = hasInitialInstall ? '설치 대기 목록' : '업데이트 목록';
+  const list = document.getElementById('ota-confirm-list');
+  list.innerHTML = '';
+  (pendingOtaData.to_install||[]).forEach(item=>list.innerHTML+=otaRowHtml(item,'i'));
+  (pendingOtaData.to_update||[]).forEach(item=>list.innerHTML+=otaRowHtml(item,'u'));
+  showOv('ov-ota-confirm');
+}
+
+function otaRowHtml(item, kind) {
+  const badge = kind==='i'?`<span class="obadge bi">신규</span>`:`<span class="obadge bu">업데이트</span>`;
+  const latVerStr = fmtVerObj(item.latest_versions) || item.latest_version || '-';
+  const det = kind==='i'?`${latVerStr} 설치 예정`:`→ ${latVerStr}`;
+  return `<div class="otarow"><span class="otarow-icon">${item.icon||'📦'}</span><div class="otarow-info"><div class="otarow-name">${item.full_name||item.name}</div><div class="otarow-detail">${det}</div></div>${badge}</div>`;
+}
+
+async function otaDecision(yes) {
+  if(!yes && isMandatoryAebZcuOta()) {
+    setOtaMandatoryUi(true);
+    showOv('ov-ota-confirm');
+    toast('AEB ZCU 업데이트는 건너뛸 수 없습니다.');
+    return;
+  }
+  closeOv('ov-ota-confirm');
+  let timer = null;
+  if(yes) {
+    showOv('ov-ota-prog');
+    document.getElementById('proglog').innerHTML = '';
+    timer = setInterval(async () => {
+      try {
+        const r = await fetch('/api/ota/progress/AEB');
+        if(r.ok) appendLog(await r.json());
+      } catch {}
+    }, 500);
+  }
+  try {
+    const r = await fetch('/api/ota/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({do_update:yes})});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail || 'OTA failed');
+    if(d.waiting_for_park) {
+      closeOv('ov-ota-prog');
+      toast(d.message || 'P단으로 바꾸면 업데이트가 시작됩니다.');
+      return;
+    }
+    if(yes && d.result) {
+      showBootResult(d.result);
+      closeOv('ov-ota-prog');
+      if(!d.result.all_success) {
+        pendingOtaData = d.pending_ota || pendingOtaData;
+        dismissedOtaKey = null;
+        setOtaMandatoryUi(isMandatoryAebZcuOta(pendingOtaData));
+        if(otaItems(pendingOtaData).length) showBanner();
+      }
+    }
+    if(!yes) {
+      pendingOtaData = null;
+      dismissBanner(true);
+    }
+  } catch(e) {
+    closeOv('ov-ota-prog');
+    toast(e.message || 'OTA failed');
+  } finally {
+    if(timer) clearInterval(timer);
+  }
+}
+
+function appendLog(d) {
+  const log=document.getElementById('proglog');
+  const el=document.createElement('div');el.className='pl';
+  el.textContent=`${d.status==='downloading'?'⬇️':'⚡'} ${d.message}`;
+  log.appendChild(el);log.scrollTop=log.scrollHeight;
+}
+
+function showBootResult(r) {
+  document.getElementById('boot-icon').textContent=r.all_success?'✅':'⚠️';
+  document.getElementById('boot-title').textContent=r.all_success?'업데이트 완료':'일부 업데이트 실패';
+  document.getElementById('boot-sub').textContent=`${(r.timestamp||'').slice(0,16).replace('T',' ')} 완료`;
+  const list=document.getElementById('boot-list');list.innerHTML='';
+  (r.results||[]).forEach(res=>{
+    const m=CATALOG.find(c=>c.id===res.feature_id)||{icon:'📦'};
+    const verDisplay = fmtVerObj(res.version) || (res.version ? `v${res.version}` : '-');
+    list.innerHTML+=`<div class="otarow"><span class="otarow-icon">${m.icon}</span><div class="otarow-info"><div class="otarow-name">${res.feature_name}${res.ecu_target ? ` (${res.ecu_target})` : ''}</div><div class="otarow-detail">${res.success?`${verDisplay} 완료`:'실패'}</div></div><span class="obadge ${res.success?'bok':'bfail'}">${res.success?'✓':'✗'}</span></div>`;
+  });
+  showOv('ov-boot-result');
+}
+
+/* ════════════════════════
+   오버레이
+   ════════════════════════ */
+function showOv(id){document.getElementById(id).classList.add('show')}
+function closeOv(id){document.getElementById(id).classList.remove('show')}
+
+/* ════════════════════════
+   루피 알림
+   ════════════════════════ */
+function showLuffy(items) {
+  if(luffyShown) return;
+  luffyShown = true;
+  document.getElementById('litems').innerHTML = items.map(i=>`
+    <div class="litem">
+      <div class="liicon">${i.icon}</div>
+      <div><div class="liname">${i.name}</div><div class="lidesc">${i.desc}</div></div>
+    </div>`).join('');
+  const n=document.getElementById('luffy-notif');n.classList.add('show');
+  setTimeout(()=>closeLuffy(),5600);
+}
+function closeLuffy(){document.getElementById('luffy-notif').classList.remove('show')}
+
+/* ════════════════════════
+   AEB
+   ════════════════════════ */
+function triggerAEB() {
+  const el=document.getElementById('aebov');
+  el.classList.remove('show');void el.offsetWidth;el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'),4200);
+}
+
+/* ════════════════════════
+   토스트
+   ════════════════════════ */
+function toast(msg,dur=2500){
+  const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'),dur);
+}
+
+/* ════════════════════════
+   스토어
+   ════════════════════════ */
+function goStore(){window.location.href='./store.html'}
+
+/* ════════════════════════
+   시연
+   ════════════════════════ */
+function toggleDemo(){document.getElementById('demopanel').classList.toggle('open')}
+
+async function demoNewFeature() {
+  luffyShown = false; // 반드시 리셋 먼저
+  toggleDemo();
+  try {
+    const r = await fetch('/api/demo/reveal-luffy', {method:'POST'});
+    const d = await r.json();
+    // WS broadcast가 오면 onNewStoreItem에서 처리됨
+    // 만약 WS가 늦으면 직접 showLuffy 호출 (fallback)
+    if(d.success && !luffyShown) {
+      showLuffy([{icon:'🐾', name:'잔망루피 오리지널 테마', desc:'새로운 UI 테마가 스토어에 등록됐습니다!'}]);
+    }
+  } catch { toast('서버 연결 실패 — 서버가 실행 중인지 확인하세요'); }
+}
+
+// 서버로부터 새 스토어 아이템 등록 알림 수신 (WS)
+function onNewStoreItem(items) {
+  showLuffy(items);
+  if(items.some(i => i.id === '루피테마')) {
+    document.getElementById('t-luffy').style.display = '';
+  }
+}
+
+function demoVersionUpdate() {
+  pendingOtaData = {
+    to_install:[],
+    to_update:[{icon:'🛣️',full_name:'LKAS 차선 유지 보조',name:'LKAS',latest_versions:{Feature:'1.1.0'}}]
+  };
+  document.getElementById('ota-banner-title').textContent = '업데이트 항목 1건이 있습니다';
+  document.getElementById('ota-banner-sub').textContent = 'LKAS 기능: v1.1.0 업데이트';
+  showBanner();
+  toggleDemo();
+}
+
+async function checkLatestVersions() {
+  toggleDemo();
+  toast('최신버전 확인 중...');
+  try {
+    const r = await fetch('/api/ota/check', {method:'POST'});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail || '최신버전 확인 실패');
+    pendingOtaData = d.pending_ota || {to_install:[], to_update:[]};
+    try {
+      const status = await fetch('/api/status');
+      if(status.ok) updateDash(await status.json());
+    } catch {}
+    const count = d.count ?? otaItems(pendingOtaData).length;
+    if(count > 0) {
+      lastOtaKey = '';
+      showBanner();
+    }
+    toast(d.message || (count ? `업데이트 ${count}건이 있습니다` : '최신버전입니다'));
+  } catch(e) {
+    toast(e.message || '최신버전 확인 실패');
+  }
+}
+
+function demoAEB(){triggerAEB();toggleDemo();}
+
+async function demoResetSettings() {
+  toggleDemo();
+  try {
+    const r = await fetch('/api/demo/reset-settings', {method:'POST'});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail || '설정 파일 초기화 실패');
+    toast(d.message || '설정 파일 초기화 완료');
+    try {
+      const status = await fetch('/api/status');
+      if(status.ok) updateDash(await status.json());
+    } catch {}
+  } catch(e) {
+    toast(e.message || '설정 파일 초기화 실패');
+  }
+}
+
+/* ════════════════════════
+   시작
+   ════════════════════════ */
+function openDebugTerminal() {
+  toggleDemo();
+  showOv('ov-debug-terminal');
+  const out = document.getElementById('termout');
+  out.textContent = '';
+  if(debugTermWs && debugTermWs.readyState === WebSocket.OPEN) return;
+  debugTermWs = new WebSocket(`ws://${location.host}/ws/debug-terminal`);
+  debugTermWs.onmessage = e => {
+    try {
+      const msg = JSON.parse(e.data);
+      if(msg.type === 'output') appendTerm(msg.data || '', msg.stream);
+      if(msg.type === 'exit') appendTerm(`\n[process exited: ${msg.code}]\n`, 'stderr');
+    } catch {
+      appendTerm(e.data, 'stdout');
+    }
+  };
+  debugTermWs.onclose = () => appendTerm('\n[terminal closed]\n', 'stderr');
+  debugTermWs.onerror = () => appendTerm('\n[terminal connection error]\n', 'stderr');
+  setTimeout(()=>document.getElementById('terminput')?.focus(), 80);
+}
+
+function closeDebugTerminal() {
+  closeOv('ov-debug-terminal');
+  if(debugTermWs) {
+    debugTermWs.close();
+    debugTermWs = null;
+  }
+}
+
+function appendTerm(text, stream='stdout') {
+  const out = document.getElementById('termout');
+  const span = document.createElement('span');
+  if(stream === 'stderr') span.className = 'err';
+  span.textContent = text;
+  out.appendChild(span);
+  out.scrollTop = out.scrollHeight;
+}
+
+function sendTermCommand() {
+  const input = document.getElementById('terminput');
+  const value = input.value;
+  if(!value || !debugTermWs || debugTermWs.readyState !== WebSocket.OPEN) return;
+  appendTerm(`PS> ${value}\n`, 'stdout');
+  debugTermWs.send(JSON.stringify({type:'input', data:`${value}\r\n`}));
+  input.value = '';
+}
+
+document.getElementById('terminput')?.addEventListener('keydown', e => {
+  if(e.key === 'Enter') {
+    e.preventDefault();
+    sendTermCommand();
+  }
+});
+
+async function openFlasher() {
+  toggleDemo();
+  showOv('ov-flasher');
+  document.getElementById('flash-log').textContent = 'Idle';
+  document.getElementById('flash-bar').style.width = '0%';
+  try {
+    const r = await fetch('/api/flasher/boards');
+    const d = await r.json();
+    const select = document.getElementById('flash-board');
+    select.innerHTML = (d.boards || []).map(b =>
+      `<option value="${b.id}" data-implemented="${b.implemented}" data-transport="${b.transport}">
+        ${b.name} (${b.transport === 'doip' ? `${b.ecu_ip}:${b.doip_port}` : 'CAN placeholder'})
+      </option>`
+    ).join('');
+    select.onchange = updateFlasherShellState;
+    updateFlasherShellState();
+  } catch {
+    toast('flasher board list failed');
+  }
+}
+
+function updateFlasherShellState() {
+  const select = document.getElementById('flash-board');
+  const opt = select.options[select.selectedIndex];
+  const implemented = opt?.dataset.implemented === 'true';
+  document.getElementById('flash-log').textContent = implemented
+    ? 'DoIP flasher ready'
+    : 'CAN flasher placeholder only. No transfer is implemented yet.';
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 0x8000;
+  for(let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+async function startManualFlash() {
+  const boardId = document.getElementById('flash-board').value;
+  const selected = document.getElementById('flash-board').selectedOptions[0];
+  if(selected?.dataset.implemented !== 'true') {
+    document.getElementById('flash-log').textContent = 'CAN flasher placeholder only. No transfer is implemented yet.';
+    toast('CAN flasher is placeholder only');
+    return;
+  }
+  const file = document.getElementById('flash-file').files[0];
+  if(!boardId || !file) {
+    toast('board and .bin file required');
+    return;
+  }
+  if(!file.name.toLowerCase().endsWith('.bin')) {
+    toast('select a .bin file');
+    return;
+  }
+  document.getElementById('flash-log').textContent = `Uploading ${file.name}...`;
+  document.getElementById('flash-bar').style.width = '3%';
+  if(flashPollTimer) clearInterval(flashPollTimer);
+  flashPollTimer = setInterval(pollFlashProgress, 350);
+  try {
+    const payload = {
+      board_id: boardId,
+      filename: file.name,
+      content_base64: arrayBufferToBase64(await file.arrayBuffer()),
+    };
+    const r = await fetch('/api/flasher/flash', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload),
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail || 'flash failed');
+    await pollFlashProgress();
+    toast(d.ok ? 'flash complete' : 'flash failed');
+  } catch(e) {
+    document.getElementById('flash-log').textContent = e.message || 'flash failed';
+    toast(e.message || 'flash failed');
+  } finally {
+    if(flashPollTimer) clearInterval(flashPollTimer);
+    flashPollTimer = null;
+  }
+}
+
+async function pollFlashProgress() {
+  try {
+    const r = await fetch('/api/ota/progress/MANUAL_FLASHER');
+    if(!r.ok) return;
+    const p = await r.json();
+    if(Number.isFinite(p.percent)) {
+      document.getElementById('flash-bar').style.width = `${Math.max(0, Math.min(100, p.percent))}%`;
+    }
+    const bytes = p.total_bytes ? `\n${p.bytes_downloaded || 0}/${p.total_bytes} bytes` : '';
+    document.getElementById('flash-log').textContent =
+      `${p.target || '-'} / ${p.status || '-'}\n${p.message || ''}${bytes}`;
+  } catch {}
+}
+
+connectWS();
+loadWeather();
+setInterval(loadWeather,5*60*1000);
+</script>
+</body>
+</html>
