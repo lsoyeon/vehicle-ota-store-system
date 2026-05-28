@@ -193,6 +193,19 @@ static uint8_t g_streamBlockBuffer[UDS_OTA_CLIENT_TRANSFER_DATA_SIZE];
 static uint8_t g_streamBlockLength = 0U;
 static boolean g_streamBlockReady = FALSE;
 
+/* debug counter */
+volatile uint32_t g_dbgTdRespEnterCount = 0U;
+volatile uint32_t g_dbgTdRespFetchOkCount = 0U;
+volatile uint32_t g_dbgTdRespTimeoutCount = 0U;
+volatile uint32_t g_dbgTdRespSidMismatchCount = 0U;
+volatile uint32_t g_dbgTdRespBscMismatchCount = 0U;
+volatile uint32_t g_dbgTdRespLenFailCount = 0U;
+volatile uint32_t g_dbgTdRespSuccessCount = 0U;
+
+volatile uint8_t g_dbgTdRespLen = 0U;
+volatile uint8_t g_dbgTdResp0 = 0U;
+volatile uint8_t g_dbgTdResp1 = 0U;
+volatile uint8_t g_dbgTdExpectedBsc = 0U;
 
 /* ============================================================
    Private prototypes
@@ -1100,8 +1113,120 @@ static void sendTransferData(void)
         setState(UDS_OTA_CLIENT_STATE_WAIT_TRANSFER_DATA);
     }
 }
+static void handleTransferDataResponse(void)
+{
+    uint8_t resp[CANFD_MAX_DLC];
+    uint8_t len = 0U;
 
+    g_dbgTdRespEnterCount++;
 
+    /*
+     * 1. 먼저 response가 있는지 확인
+     *    response가 없을 때만 timeout 검사
+     */
+    if (fetchResponse(resp, &len) == FALSE)
+    {
+        if (checkTimeout(UDS_OTA_CLIENT_TRANSFER_TIMEOUT_TICKS) == TRUE)
+        {
+            g_dbgTdRespTimeoutCount++;
+        }
+
+        return;
+    }
+
+    /*
+     * 여기까지 왔으면 0x601 response는 실제로 UdsOtaClient까지 들어온 것
+     */
+    g_dbgTdRespFetchOkCount++;
+
+    g_dbgTdRespLen = len;
+    g_dbgTdResp0 = resp[0];
+    g_dbgTdResp1 = (len > 1U) ? resp[1] : 0U;
+    g_dbgTdExpectedBsc = g_clientDebug.currentBsc;
+
+    /*
+     * Negative Response: 7F 36 NRC
+     */
+    if ((len >= 3U) && (resp[0] == UDS_SID_NEGATIVE_RESPONSE))
+    {
+        g_clientDebug.lastRxSid = resp[0];
+        g_clientDebug.lastRxNrc = resp[2];
+
+        setError(UDS_OTA_CLIENT_RESULT_NEGATIVE_RESPONSE);
+        return;
+    }
+
+    /*
+     * Positive response 최소 길이 확인
+     * Sensor ECU는 CAN FD 64 byte로 응답하므로 len == 2가 아니라 len >= 2여야 함
+     */
+    if (len < 2U)
+    {
+        g_dbgTdRespLenFailCount++;
+        setError(UDS_OTA_CLIENT_RESULT_UNEXPECTED_RESPONSE);
+        return;
+    }
+
+    /*
+     * SID 확인: 0x36 positive response = 0x76
+     */
+    if (resp[0] != positiveResponseSid(UDS_SID_TRANSFER_DATA))
+    {
+        g_dbgTdRespSidMismatchCount++;
+        setError(UDS_OTA_CLIENT_RESULT_UNEXPECTED_RESPONSE);
+        return;
+    }
+
+    /*
+     * BSC 확인
+     * 예: currentBsc = 0x02 이면 response는 76 02 여야 함
+     */
+    if (resp[1] != g_clientDebug.currentBsc)
+    {
+        g_dbgTdRespBscMismatchCount++;
+        setError(UDS_OTA_CLIENT_RESULT_UNEXPECTED_RESPONSE);
+        return;
+    }
+
+    /*
+     * 여기까지 오면 76 xx 정상 처리 branch
+     */
+    g_dbgTdRespSuccessCount++;
+
+    g_clientDebug.currentBlockIndex++;
+    g_clientDebug.sentBytes =
+        g_clientDebug.currentBlockIndex * UDS_OTA_CLIENT_TRANSFER_DATA_SIZE;
+
+    if (g_clientDebug.sentBytes > g_firmwareSize)
+    {
+        g_clientDebug.sentBytes = g_firmwareSize;
+    }
+
+    if (g_firmwareSize > 0U)
+    {
+        g_clientDebug.lastProgressPercent =
+            (g_clientDebug.sentBytes * 100U) / g_firmwareSize;
+    }
+
+    g_clientDebug.currentBsc++;
+
+    /*
+     * uint8 overflow로 0xFF 다음 0x00 자연 wrap.
+     */
+    g_streamBlockReady = FALSE;
+    g_streamBlockLength = 0U;
+    memset(g_streamBlockBuffer, 0, sizeof(g_streamBlockBuffer));
+
+    if (g_clientDebug.currentBlockIndex >= g_clientDebug.totalBlocks)
+    {
+        proceedAfterAllBlocksSent();
+    }
+    else
+    {
+        setState(UDS_OTA_CLIENT_STATE_WAIT_STREAM_BLOCK);
+    }
+}
+#if 0
 static void handleTransferDataResponse(void)
 {
     uint8_t resp[CANFD_MAX_DLC];
@@ -1160,7 +1285,7 @@ static void handleTransferDataResponse(void)
         setError(UDS_OTA_CLIENT_RESULT_UNEXPECTED_RESPONSE);
     }
 }
-
+#endif
 
 static void sendRequestTransferExit(void)
 {

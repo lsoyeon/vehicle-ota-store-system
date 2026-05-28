@@ -52,7 +52,7 @@
  *  - 너무 짧게 잡으면 Sensor ECU flash erase/write 응답 대기 중 timeout이 날 수 있다.
  */
 #define APP_SENSOR_OTA_GATEWAY_WAIT_BLOCK_TIMEOUT_MS      5000U
-#define APP_SENSOR_OTA_GATEWAY_WAIT_NEXT_TIMEOUT_MS       5000U
+#define APP_SENSOR_OTA_GATEWAY_WAIT_NEXT_TIMEOUT_MS       5000U 
 #define APP_SENSOR_OTA_GATEWAY_WAIT_DONE_TIMEOUT_MS       60000U
 
 /* ============================================================
@@ -101,6 +101,12 @@ volatile uint32 g_sensorOtaUdsFinalCrcFailCount = 0U;
 volatile uint32 g_sensorOtaUdsWaitBlockTimeoutCount = 0U;
 volatile uint32 g_sensorOtaUdsWaitNextTimeoutCount = 0U;
 volatile uint32 g_sensorOtaUdsWaitDoneTimeoutCount = 0U;
+//debug
+volatile uint32 g_dbgWaitNextFailBlockIndex = 0U;
+volatile uint32 g_dbgWaitNextFailReqIndex = 0U;
+volatile uint32 g_dbgWaitNextFailIsWaitingBlock = 0U;
+volatile uint32 g_dbgWaitNextFailIsWaitingFinalCrc = 0U;
+volatile uint32 g_dbgWaitNextFailIsError = 0U;
 
 /* ============================================================
    Private prototypes
@@ -485,9 +491,15 @@ static uint16 handleTransferData(uint8 *rx, uint16 rxLen, uint8 *tx)
      * Sensor ECU 쪽 0x36 응답까지 처리되어 다음 block 대기 상태 또는 WAIT_FINAL_CRC 상태가 될 때까지 기다린다.
      */
     if(waitUntilBlockConsumedOrFinalCrc(requestedBlockIndex,
-                                        APP_SENSOR_OTA_GATEWAY_WAIT_NEXT_TIMEOUT_MS) == FALSE)
+                                    APP_SENSOR_OTA_GATEWAY_WAIT_NEXT_TIMEOUT_MS) == FALSE)
     {
         g_sensorOtaUdsWaitNextTimeoutCount++;
+
+        g_dbgWaitNextFailBlockIndex = requestedBlockIndex;
+        g_dbgWaitNextFailReqIndex = AppOtaReceiver_GetRequestedBlockIndex();
+        g_dbgWaitNextFailIsWaitingBlock = AppOtaReceiver_IsWaitingBlock();
+        g_dbgWaitNextFailIsWaitingFinalCrc = AppOtaReceiver_IsWaitingFinalCrc();
+        g_dbgWaitNextFailIsError = AppOtaReceiver_IsError();
 
         return makeNegativeResponse(tx,
                                     APP_SENSOR_OTA_GATEWAY_UDS_SID_TRANSFER_DATA,
@@ -547,7 +559,7 @@ static uint16 handleTransferExit(uint8 *rx, uint16 rxLen, uint8 *tx)
     }
 
     expectedCrc = readU32Be(&rx[1]);
-
+    //expectedCrc = 0x12345678;  //debug
     g_expectedCrc32 = expectedCrc;
     g_sensorOtaUdsExpectedCrc32 = expectedCrc;
 
