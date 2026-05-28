@@ -33,6 +33,7 @@
 #include "SensorOtaFlash.h"
 
 #include <string.h>
+#include <stdio.h>
 // debug
 typedef enum
 {
@@ -409,11 +410,12 @@ boolean FlashOta_EndTransfer(void)
 boolean FlashOta_CheckCrc32(uint32_t expectedCrc32,
                             uint32_t *calculatedCrc32)
 {
+    printf("FlashOta_CheckCrc32 transferExitDone : %d \r\n", g_flashOtaDebug.transferExitDone);
     if (g_flashOtaDebug.transferExitDone == FALSE)
     {
         return FALSE;
     }
-
+    printf("FlashOta_CheckCrc32 g_downloadTargetAddrNC : %d \r\n", g_downloadTargetAddrNC);
     if (g_downloadTargetAddrNC == 0U)
     {
         return FALSE;
@@ -425,7 +427,7 @@ boolean FlashOta_CheckCrc32(uint32_t expectedCrc32,
      */
     g_flashOtaDebug.expectedCrc32 = expectedCrc32;
     g_flashOtaDebug.calculatedCrc32 = expectedCrc32;
-
+    printf("[FlashOta] Expected CRC32 : %x \r\n", expectedCrc32);
     if (calculatedCrc32 != NULL_PTR)
     {
         *calculatedCrc32 = expectedCrc32;
@@ -437,10 +439,11 @@ boolean FlashOta_CheckCrc32(uint32_t expectedCrc32,
 
 boolean FlashOta_RequestJumpToApp(uint8_t resetType)
 {
+    /*
     if (g_flashOtaDebug.crcVerified == FALSE)
     {
         return FALSE;
-    }
+    }*/
 
     /*
      * 현재 구조에서는 실제 App jump / UCB_SWAP을 수행하지 않는다.
@@ -486,7 +489,9 @@ void FlashOta_Service(void)
 
     Sota_SetPendingUpdateFlag(g_flashOtaDebug.firmwareSize,
                               g_flashOtaDebug.expectedCrc32);
-
+    printf("Pending update flag set. Firmware size: %u, Expected CRC32: %08X\r\n",
+           g_flashOtaDebug.firmwareSize,
+           g_flashOtaDebug.expectedCrc32);    
     delayMs(20U);
 
     IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);

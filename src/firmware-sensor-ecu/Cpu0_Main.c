@@ -13,6 +13,7 @@
 #include "FlashOta.h"
 #include "UART_VCOM.h"
 #include "IfxAsclin_Asc.h"
+#include <stdio.h>
 #define SLOW
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
@@ -71,6 +72,9 @@ void core0_main(void)
     IfxPort_setPinModeOutput(&MODULE_P00, 5, IfxPort_OutputMode_pushPull, IfxPort_OutputIdx_general); 
     g_isGroupBActive = Sota_IsGroupBActive();
     g_isGroupBActive ? printf("Bank B!\r\n") : printf("Bank A!\r\n");       
+    volatile boolean b = TRUE;
+    volatile uint32 temp_uint = 3;
+    printf("%d %x\r\n", b, temp_uint);
     #ifdef SLOW
         printf("Sensor ECU Main - SLOW\r\n");
     #else
