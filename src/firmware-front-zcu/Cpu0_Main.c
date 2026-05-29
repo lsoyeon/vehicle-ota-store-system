@@ -68,7 +68,7 @@ IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 #define LED_500MS_PIN (&IfxPort_P00_6)
 #define APP_FRONTZCU_VERSION "1.0.0"
 
-#define SENSOR_OTA_DOIP_INIT_DELAY_MS      2000U
+#define SENSOR_OTA_DOIP_INIT_DELAY_MS      8000U
 #define SENSOR_OTA_DOIP_TASK_STACK_SIZE    (configMINIMAL_STACK_SIZE)
 #define SENSOR_OTA_DOIP_TASK_PRIORITY      (tskIDLE_PRIORITY + 1U)
 
@@ -243,36 +243,49 @@ static void task_app_led_500ms(void *arg)
 
 static void task_sensor_ota_doip_init(void *arg)
 {
-    (void)arg;
+    uint32_t retryCount = 0U;
 
-    g_mainSensorOtaDoipInitTaskRunCount++;
+    (void)arg;
 
     /*
      * AppEth_Start() 이후 실제 lwIP/TCP stack이 준비될 시간을 준다.
-     *
-     * 이전 문제:
-     *  - core0_main()에서 scheduler 시작 전에 AppSensorOtaGatewayDoip_Init() 호출
-     *  - g_sensorOtaDoipInitCount = 1
-     *  - g_sensorOtaDoipBindOkCount = 0
-     *  - g_sensorOtaDoipBindFailCount = 1
-     *
-     * 기대:
-     *  - scheduler 시작 후 delay
-     *  - tcp_new/tcp_bind 성공
-     *  - g_sensorOtaDoipBindOkCount = 1
+     * 기존 2초 1회 시도는 너무 빨라서 tcp_new()가 실패할 수 있다.
      */
     vTaskDelay(pdMS_TO_TICKS(SENSOR_OTA_DOIP_INIT_DELAY_MS));
 
-    AppSensorOtaGatewayDoip_Init();
+    while(AppSensorOtaGatewayDoip_IsReady() == FALSE)
+    {
+        g_mainSensorOtaDoipInitTaskRunCount++;
+
+        AppSensorOtaGatewayDoip_Init();
+
+        if(AppSensorOtaGatewayDoip_IsReady() == TRUE)
+        {
+            break;
+        }
+
+        retryCount++;
+
+        /*
+         * 아직 lwIP/TCP stack이 준비되지 않았거나 tcp_new()가 실패한 경우
+         * 1초 뒤 다시 시도한다.
+         */
+        vTaskDelay(pdMS_TO_TICKS(1000U));
+
+        /*
+         * 디버깅 중 무한 반복 방지.
+         * 필요하면 이 제한은 제거해도 된다.
+         */
+        if(retryCount >= 60U)
+        {
+            break;
+        }
+    }
 
     g_mainSensorOtaDoipInitTaskDoneCount++;
 
-    /*
-     * DoIP init은 1회만 수행하면 되므로 task 종료.
-     */
     vTaskDelete(NULL);
 }
-
 static void app_assert_pass(BaseType_t result)
 {
     if(result != pdPASS)

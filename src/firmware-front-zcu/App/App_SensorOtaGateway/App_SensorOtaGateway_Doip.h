@@ -104,4 +104,6 @@ typedef struct
  */
 void AppSensorOtaGatewayDoip_Init(void);
 
+boolean AppSensorOtaGatewayDoip_IsReady(void);
+
 #endif /* APP_SENSOR_OTA_GATEWAY_DOIP_H_ */

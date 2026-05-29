@@ -170,6 +170,58 @@ OtaGateway_Result_t OtaGateway_StartWithoutCrc(uint32_t firmwareSize)
     return OTA_GATEWAY_RESULT_OK;
 }
 
+OtaGateway_Result_t OtaGateway_StartSparse(const UdsOtaClient_SparseManifest_t *manifest)
+{
+    UdsOtaClient_Result_t clientResult;
+    uint32_t totalPayloadSize = 0U;
+    uint8_t i;
+
+    if (manifest == NULL_PTR)
+    {
+        setResult(OTA_GATEWAY_RESULT_INVALID_PARAM);
+        return OTA_GATEWAY_RESULT_INVALID_PARAM;
+    }
+
+    if ((manifest->segmentCount == 0U) ||
+        (manifest->segmentCount > UDS_OTA_CLIENT_MAX_SEGMENTS))
+    {
+        setResult(OTA_GATEWAY_RESULT_INVALID_PARAM);
+        return OTA_GATEWAY_RESULT_INVALID_PARAM;
+    }
+
+    if (OtaGateway_IsBusy() == TRUE)
+    {
+        setResult(OTA_GATEWAY_RESULT_BUSY);
+        return OTA_GATEWAY_RESULT_BUSY;
+    }
+
+    for (i = 0U; i < manifest->segmentCount; i++)
+    {
+        totalPayloadSize += manifest->segments[i].size;
+    }
+
+    OtaGateway_Reset();
+
+    g_otaGatewayDebug.firmwareSize = totalPayloadSize;
+    g_otaGatewayDebug.firmwareCrc32 = manifest->virtualCrc32;
+    g_otaGatewayDebug.startRequestCount++;
+
+    updateFinalCrcFlag(TRUE);
+
+    clientResult = UdsOtaClient_StartSparse(manifest);
+
+    if (clientResult != UDS_OTA_CLIENT_RESULT_OK)
+    {
+        setResult(OTA_GATEWAY_RESULT_CLIENT_ERROR);
+        setState(OTA_GATEWAY_STATE_ERROR);
+        return OTA_GATEWAY_RESULT_CLIENT_ERROR;
+    }
+
+    setResult(OTA_GATEWAY_RESULT_OK);
+    setState(OTA_GATEWAY_STATE_IN_PROGRESS);
+
+    return OTA_GATEWAY_RESULT_OK;
+}
 
 OtaGateway_Result_t OtaGateway_SetFinalCrc(uint32_t firmwareCrc32)
 {

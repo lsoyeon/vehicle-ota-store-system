@@ -37,7 +37,7 @@
 #define BOARDNAME               "AURIXLK2TC375TP"   /* Board name, also used as hostname                                    */
 
 #define MEM_ALIGNMENT           4                   /* Set memory alignment to 4 byte (32-bit machine)                      */
-#define MEM_SIZE                (25 * 1024)         /* Size of the Heap                                                     */
+#define MEM_SIZE                (64 * 1024)         /* Size of the Heap                                                     */
 #define LWIP_DHCP               0                   /* Enable DHCP protocol                                                 */
 #define LWIP_NETCONN            0                   /* Disable Netconn API                                                  */
 #define LWIP_SOCKET             0                   /* Disable the Socket API                                               */
@@ -64,6 +64,24 @@
 #ifdef __GNUC__
     /* to avoid compiler error for double declaration we inform GNUC that ssize_t is declared by lwip */
     #define _SSIZE_T_DECLARED
+#endif
+
+/*
+ * ZCU uses multiple TCP services:
+ *  - existing ZCU DoIP server on 13400
+ *  - Sensor ECU OTA Gateway DoIP server on 13401
+ *  - additional Ethernet/SOME-IP related connections
+ *
+ * tcp_new() for 13401 failed when the default TCP PCB pool was used.
+ */
+#undef MEMP_NUM_TCP_PCB
+#define MEMP_NUM_TCP_PCB        24
+
+#undef MEMP_NUM_TCP_PCB_LISTEN
+#define MEMP_NUM_TCP_PCB_LISTEN 10
+
+#ifndef TCP_LISTEN_BACKLOG
+#define TCP_LISTEN_BACKLOG      0
 #endif
 
 #endif /* __LWIPOPTS_H__ */

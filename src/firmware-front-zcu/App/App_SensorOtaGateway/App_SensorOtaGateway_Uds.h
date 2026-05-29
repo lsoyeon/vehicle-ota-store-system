@@ -97,6 +97,10 @@
 #define APP_SENSOR_OTA_GATEWAY_UDS_NRC_WRONG_BLOCK_SEQ_COUNTER     0x73U
 #define APP_SENSOR_OTA_GATEWAY_UDS_NRC_GENERAL_PROG_FAILURE        0x72U
 
+
+#define APP_SENSOR_OTA_GATEWAY_UDS_SID_SPARSE_MANIFEST 0xB4U
+
+#define APP_SENSOR_OTA_GATEWAY_UDS_SID_OTA_READY_CHECK    0xB5U
 /* ============================================================
    Public API
    ============================================================ */

@@ -36,7 +36,7 @@
 
 #include "Ifx_Types.h"
 #include "FreeRTOS.h"
-
+#include "App/App_OtaGateway/UdsOtaClient.h"
 #include <stdint.h>
 
 /* ============================================================
@@ -124,6 +124,9 @@ BaseType_t AppOtaReceiver_ProvideBlock(uint32_t blockIndex,
 BaseType_t AppOtaReceiver_Cancel(TickType_t waitTicks);
 
 BaseType_t AppOtaReceiver_RequestSensorEcuReset(TickType_t waitTicks);
+
+BaseType_t AppOtaReceiver_StartSparseDownload(const UdsOtaClient_SparseManifest_t *manifest,
+                                              TickType_t waitTicks);
 
 /* ============================================================
    Gateway state helper

@@ -45,6 +45,7 @@
  *********************************************************************************************************************/
 
 #include "Ifx_Types.h"
+#include "UdsOtaClient.h"
 #include <stdint.h>
 
 /* ============================================================
@@ -158,6 +159,8 @@ void OtaGateway_Reset(void);
  */
 OtaGateway_Result_t OtaGateway_Start(uint32_t firmwareSize,
                                      uint32_t firmwareCrc32);
+
+OtaGateway_Result_t OtaGateway_StartSparse(const UdsOtaClient_SparseManifest_t *manifest);
 
 /**
  * @brief OTA Download 시작 - Late CRC mode

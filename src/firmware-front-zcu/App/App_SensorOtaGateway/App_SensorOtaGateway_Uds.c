@@ -1,6 +1,6 @@
 /**********************************************************************************************************************
  * \file App_SensorOtaGateway_Uds.c
- * \brief Sensor ECU OTA Gateway UDS adapter for DoIP
+ * \brief Sensor ECU OTA Gateway UDS adapter for DoIP - sparse manifest support
  *
  * 역할:
  *  - Pi/HPC가 DoIP로 보낸 UDS payload를 해석한다.
@@ -22,23 +22,49 @@
  *
  * 지원 UDS 서비스:
  *  - 0x10 DiagnosticSessionControl
+ *  - 0xB4 SparseManifest, ZCU 내부 custom service
  *  - 0x34 RequestDownload
  *  - 0x36 TransferData
  *  - 0x37 RequestTransferExit + CRC32
+ *  - 0x11 ECUReset
  *
  * 중요:
  *  - 이 모듈은 ZCU Local OTA용이 아니다.
  *  - Sensor ECU OTA 중계용이다.
+ *
+ * Sparse OTA 입력 흐름:
+ *  1. PC/HPC -> ZCU: 10 03
+ *  2. PC/HPC -> ZCU: B4 sparse manifest
+ *  3. PC/HPC -> ZCU: 34 totalPayloadSize
+ *  4. PC/HPC -> ZCU: 36 block stream, segment1.bin + segment2.bin을 이어붙인 payload stream
+ *  5. PC/HPC -> ZCU: 37 virtualCrc32
+ *  6. PC/HPC -> ZCU: 11 01
  *********************************************************************************************************************/
 
 #include "App_SensorOtaGateway_Uds.h"
 
 #include "App_OtaReceiver/App_OtaReceiver.h"
+#include "App/App_OtaGateway/UdsOtaClient.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
 
 #include <string.h>
+
+/* ============================================================
+   Optional local define
+   ============================================================ */
+
+/*
+ * App_SensorOtaGateway_Uds.h에 아직 추가하지 않은 경우에도
+ * 이 c 파일 단독으로 빌드되도록 fallback define을 둔다.
+ *
+ * 권장:
+ *  - 추후 App_SensorOtaGateway_Uds.h에도 같은 define을 추가한다.
+ */
+#ifndef APP_SENSOR_OTA_GATEWAY_UDS_SID_SPARSE_MANIFEST
+#define APP_SENSOR_OTA_GATEWAY_UDS_SID_SPARSE_MANIFEST     0xB4U
+#endif
 
 /* ============================================================
    Timeout config
@@ -50,23 +76,34 @@
  * 주의:
  *  - vTaskDelay(1ms)를 사용하므로 이 함수는 FreeRTOS task context에서 호출되어야 한다.
  *  - 너무 짧게 잡으면 Sensor ECU flash erase/write 응답 대기 중 timeout이 날 수 있다.
+ *  - Sensor ECU의 0x34 RequestDownload는 inactive slot erase 때문에 오래 걸릴 수 있다.
  */
-#define APP_SENSOR_OTA_GATEWAY_WAIT_BLOCK_TIMEOUT_MS      5000U
-#define APP_SENSOR_OTA_GATEWAY_WAIT_NEXT_TIMEOUT_MS       5000U 
+#define APP_SENSOR_OTA_GATEWAY_WAIT_BLOCK_TIMEOUT_MS      70000U
+#define APP_SENSOR_OTA_GATEWAY_WAIT_NEXT_TIMEOUT_MS       5000U
 #define APP_SENSOR_OTA_GATEWAY_WAIT_DONE_TIMEOUT_MS       60000U
 
 /* ============================================================
    Internal state
    ============================================================ */
 
-static uint8  g_session = APP_SENSOR_OTA_GATEWAY_UDS_SESSION_DEFAULT;
+static uint8 g_session = APP_SENSOR_OTA_GATEWAY_UDS_SESSION_DEFAULT;
 
 static uint32 g_downloadSize = 0U;
 static uint32 g_receivedBytes = 0U;
-static uint8  g_blockSeq = 0x01U;
+static uint8 g_blockSeq = 0x01U;
 
 /* 마지막 0x37에서 받은 CRC 확인용 */
 static uint32 g_expectedCrc32 = 0U;
+
+/*
+ * Sparse manifest state.
+ *
+ * g_sparseManifestValid == TRUE이면 다음 0x34 RequestDownload는
+ * legacy StartDownloadWithoutCrc가 아니라 StartSparseDownload로 시작한다.
+ */
+static UdsOtaClient_SparseManifest_t g_sparseManifest;
+static boolean g_sparseManifestValid = FALSE;
+static uint32 g_sparsePayloadSize = 0U;
 
 /* ============================================================
    Debug variables
@@ -76,7 +113,6 @@ volatile uint32 g_sensorOtaUdsSessionReqCount = 0U;
 volatile uint32 g_sensorOtaUdsRequestDownloadCount = 0U;
 volatile uint32 g_sensorOtaUdsTransferDataCount = 0U;
 volatile uint32 g_sensorOtaUdsTransferExitCount = 0U;
-
 volatile uint32 g_sensorOtaUdsNegResponseCount = 0U;
 
 volatile uint32 g_sensorOtaUdsLastSid = 0U;
@@ -92,6 +128,9 @@ volatile uint32 g_sensorOtaUdsLastBlockLength = 0U;
 volatile uint32 g_sensorOtaUdsStartNoCrcOkCount = 0U;
 volatile uint32 g_sensorOtaUdsStartNoCrcFailCount = 0U;
 
+volatile uint32 g_sensorOtaUdsStartSparseOkCount = 0U;
+volatile uint32 g_sensorOtaUdsStartSparseFailCount = 0U;
+
 volatile uint32 g_sensorOtaUdsProvideBlockOkCount = 0U;
 volatile uint32 g_sensorOtaUdsProvideBlockFailCount = 0U;
 
@@ -101,7 +140,18 @@ volatile uint32 g_sensorOtaUdsFinalCrcFailCount = 0U;
 volatile uint32 g_sensorOtaUdsWaitBlockTimeoutCount = 0U;
 volatile uint32 g_sensorOtaUdsWaitNextTimeoutCount = 0U;
 volatile uint32 g_sensorOtaUdsWaitDoneTimeoutCount = 0U;
-//debug
+
+/* Sparse manifest debug */
+volatile uint32 g_sensorOtaUdsSparseManifestCount = 0U;
+volatile uint32 g_sensorOtaUdsSparseManifestOkCount = 0U;
+volatile uint32 g_sensorOtaUdsSparseManifestFailCount = 0U;
+volatile uint32 g_sensorOtaUdsSparsePayloadSize = 0U;
+volatile uint32 g_sensorOtaUdsSparseVirtualSize = 0U;
+volatile uint32 g_sensorOtaUdsSparseVirtualCrc32 = 0U;
+volatile uint32 g_sensorOtaUdsSparseSegmentCount = 0U;
+volatile uint32 g_sensorOtaUdsSparseGapFill = 0U;
+
+/* debug */
 volatile uint32 g_dbgWaitNextFailBlockIndex = 0U;
 volatile uint32 g_dbgWaitNextFailReqIndex = 0U;
 volatile uint32 g_dbgWaitNextFailIsWaitingBlock = 0U;
@@ -115,6 +165,7 @@ volatile uint32 g_dbgWaitNextFailIsError = 0U;
 static uint16 makeNegativeResponse(uint8 *tx, uint8 sid, uint8 nrc);
 
 static uint16 handleSessionControl(uint8 *rx, uint16 rxLen, uint8 *tx);
+static uint16 handleSparseManifest(uint8 *rx, uint16 rxLen, uint8 *tx);
 static uint16 handleRequestDownload(uint8 *rx, uint16 rxLen, uint8 *tx);
 static uint16 handleTransferData(uint8 *rx, uint16 rxLen, uint8 *tx);
 static uint16 handleTransferExit(uint8 *rx, uint16 rxLen, uint8 *tx);
@@ -127,8 +178,13 @@ static boolean waitUntilBlockConsumedOrFinalCrc(uint32 blockIndex, uint32 timeou
 static boolean waitUntilDoneOrError(uint32 timeoutMs);
 
 static void resetDownloadState(void);
+static void resetSparseManifestState(void);
 static uint8 nextBlockSeq(uint8 currentSeq);
 
+static boolean validateSparseManifest(const UdsOtaClient_SparseManifest_t *manifest,
+                                      uint32 *totalPayloadSize);
+
+static uint16 handleOtaReadyCheck(uint8 *rx, uint16 rxLen, uint8 *tx);
 
 /* ============================================================
    Public functions
@@ -137,13 +193,14 @@ static uint8 nextBlockSeq(uint8 currentSeq);
 void AppSensorOtaGatewayUds_Init(void)
 {
     g_session = APP_SENSOR_OTA_GATEWAY_UDS_SESSION_DEFAULT;
+
     resetDownloadState();
+    resetSparseManifestState();
 
     g_sensorOtaUdsSessionReqCount = 0U;
     g_sensorOtaUdsRequestDownloadCount = 0U;
     g_sensorOtaUdsTransferDataCount = 0U;
     g_sensorOtaUdsTransferExitCount = 0U;
-
     g_sensorOtaUdsNegResponseCount = 0U;
 
     g_sensorOtaUdsLastSid = 0U;
@@ -158,6 +215,8 @@ void AppSensorOtaGatewayUds_Init(void)
 
     g_sensorOtaUdsStartNoCrcOkCount = 0U;
     g_sensorOtaUdsStartNoCrcFailCount = 0U;
+    g_sensorOtaUdsStartSparseOkCount = 0U;
+    g_sensorOtaUdsStartSparseFailCount = 0U;
 
     g_sensorOtaUdsProvideBlockOkCount = 0U;
     g_sensorOtaUdsProvideBlockFailCount = 0U;
@@ -168,8 +227,22 @@ void AppSensorOtaGatewayUds_Init(void)
     g_sensorOtaUdsWaitBlockTimeoutCount = 0U;
     g_sensorOtaUdsWaitNextTimeoutCount = 0U;
     g_sensorOtaUdsWaitDoneTimeoutCount = 0U;
-}
 
+    g_sensorOtaUdsSparseManifestCount = 0U;
+    g_sensorOtaUdsSparseManifestOkCount = 0U;
+    g_sensorOtaUdsSparseManifestFailCount = 0U;
+    g_sensorOtaUdsSparsePayloadSize = 0U;
+    g_sensorOtaUdsSparseVirtualSize = 0U;
+    g_sensorOtaUdsSparseVirtualCrc32 = 0U;
+    g_sensorOtaUdsSparseSegmentCount = 0U;
+    g_sensorOtaUdsSparseGapFill = 0U;
+
+    g_dbgWaitNextFailBlockIndex = 0U;
+    g_dbgWaitNextFailReqIndex = 0U;
+    g_dbgWaitNextFailIsWaitingBlock = 0U;
+    g_dbgWaitNextFailIsWaitingFinalCrc = 0U;
+    g_dbgWaitNextFailIsError = 0U;
+}
 
 void AppSensorOtaGatewayUds_Task(void)
 {
@@ -181,10 +254,40 @@ void AppSensorOtaGatewayUds_Task(void)
      */
 }
 
+static uint16 handleOtaReadyCheck(uint8 *rx, uint16 rxLen, uint8 *tx)
+{
+    (void)rx;
+    (void)rxLen;
 
-void AppSensorOtaGatewayUds_HandleService(uint8  *rxData,
-                                          uint16  rxLen,
-                                          uint8  *txData,
+    /*
+     * Positive response:
+     *   F5 00 = not ready
+     *   F5 01 = ready for TransferData
+     *   F5 7F = error
+     */
+
+    tx[0] = APP_SENSOR_OTA_GATEWAY_UDS_SID_OTA_READY_CHECK +
+            APP_SENSOR_OTA_GATEWAY_UDS_POS_RESPONSE_OFFSET;
+
+    if(AppOtaReceiver_IsError() == TRUE)
+    {
+        tx[1] = 0x7FU;
+        return 2U;
+    }
+
+    if(AppOtaReceiver_IsWaitingBlock() == TRUE)
+    {
+        tx[1] = 0x01U;
+        return 2U;
+    }
+
+    tx[1] = 0x00U;
+    return 2U;
+}
+
+void AppSensorOtaGatewayUds_HandleService(uint8 *rxData,
+                                          uint16 rxLen,
+                                          uint8 *txData,
                                           uint16 *txLen)
 {
     uint8 sid;
@@ -211,6 +314,12 @@ void AppSensorOtaGatewayUds_HandleService(uint8  *rxData,
             break;
         }
 
+        case APP_SENSOR_OTA_GATEWAY_UDS_SID_SPARSE_MANIFEST:
+        {
+            *txLen = handleSparseManifest(rxData, rxLen, txData);
+            break;
+        }
+
         case APP_SENSOR_OTA_GATEWAY_UDS_SID_REQUEST_DOWNLOAD:
         {
             *txLen = handleRequestDownload(rxData, rxLen, txData);
@@ -228,11 +337,19 @@ void AppSensorOtaGatewayUds_HandleService(uint8  *rxData,
             *txLen = handleTransferExit(rxData, rxLen, txData);
             break;
         }
+
         case APP_SENSOR_OTA_GATEWAY_UDS_SID_ECU_RESET:
         {
             *txLen = handleEcuReset(rxData, rxLen, txData);
             break;
         }
+
+        case APP_SENSOR_OTA_GATEWAY_UDS_SID_OTA_READY_CHECK:
+        {
+            *txLen = handleOtaReadyCheck(rxData, rxLen, txData);
+            break;
+        }
+
         default:
         {
             *txLen = makeNegativeResponse(txData,
@@ -267,6 +384,15 @@ static uint16 handleSessionControl(uint8 *rx, uint16 rxLen, uint8 *tx)
     {
         g_session = reqSession;
 
+        /*
+         * default session으로 돌아가는 경우 진행 중이던 manifest/download 상태를 정리한다.
+         */
+        if(reqSession == APP_SENSOR_OTA_GATEWAY_UDS_SESSION_DEFAULT)
+        {
+            resetDownloadState();
+            resetSparseManifestState();
+        }
+
         tx[0] = APP_SENSOR_OTA_GATEWAY_UDS_SID_SESSION_CONTROL +
                 APP_SENSOR_OTA_GATEWAY_UDS_POS_RESPONSE_OFFSET;
         tx[1] = reqSession;
@@ -288,6 +414,108 @@ static uint16 handleSessionControl(uint8 *rx, uint16 rxLen, uint8 *tx)
                                 APP_SENSOR_OTA_GATEWAY_UDS_NRC_SUBFUNC_NOT_SUPPORTED);
 }
 
+static uint16 handleSparseManifest(uint8 *rx, uint16 rxLen, uint8 *tx)
+{
+    uint8 segmentCount;
+    uint8 i;
+    uint16 pos;
+    uint32 totalPayloadSize = 0U;
+
+    g_sensorOtaUdsSparseManifestCount++;
+
+    if(g_session != APP_SENSOR_OTA_GATEWAY_UDS_SESSION_EXTENDED)
+    {
+        g_sensorOtaUdsSparseManifestFailCount++;
+        return makeNegativeResponse(tx,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_SID_SPARSE_MANIFEST,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_NRC_CONDITIONS_NOT_CORRECT);
+    }
+
+    /*
+     * Custom sparse manifest format:
+     * [0]      SID = 0xB4
+     * [1..4]   virtualSize   BE
+     * [5..8]   virtualCrc32  BE
+     * [9]      segmentCount
+     * [10]     gapFill
+     * [11..]   segment entries, each: offset BE 4 bytes + size BE 4 bytes
+     */
+    if(rxLen < 11U)
+    {
+        g_sensorOtaUdsSparseManifestFailCount++;
+        return makeNegativeResponse(tx,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_SID_SPARSE_MANIFEST,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_NRC_GENERAL_REJECT);
+    }
+
+    segmentCount = rx[9];
+
+    if((segmentCount == 0U) ||
+       (segmentCount > UDS_OTA_CLIENT_MAX_SEGMENTS))
+    {
+        g_sensorOtaUdsSparseManifestFailCount++;
+        return makeNegativeResponse(tx,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_SID_SPARSE_MANIFEST,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_NRC_REQUEST_OUT_OF_RANGE);
+    }
+
+    if(rxLen < (uint16)(11U + ((uint16)segmentCount * 8U)))
+    {
+        g_sensorOtaUdsSparseManifestFailCount++;
+        return makeNegativeResponse(tx,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_SID_SPARSE_MANIFEST,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_NRC_GENERAL_REJECT);
+    }
+
+    memset(&g_sparseManifest, 0, sizeof(g_sparseManifest));
+
+    g_sparseManifest.virtualSize = readU32Be(&rx[1]);
+    g_sparseManifest.virtualCrc32 = readU32Be(&rx[5]);
+    g_sparseManifest.segmentCount = segmentCount;
+    g_sparseManifest.gapFill = rx[10];
+
+    pos = 11U;
+
+    for(i = 0U; i < segmentCount; i++)
+    {
+        g_sparseManifest.segments[i].offset = readU32Be(&rx[pos]);
+        pos += 4U;
+
+        g_sparseManifest.segments[i].size = readU32Be(&rx[pos]);
+        pos += 4U;
+    }
+
+    if(validateSparseManifest(&g_sparseManifest, &totalPayloadSize) == FALSE)
+    {
+        resetSparseManifestState();
+
+        g_sensorOtaUdsSparseManifestFailCount++;
+        return makeNegativeResponse(tx,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_SID_SPARSE_MANIFEST,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_NRC_REQUEST_OUT_OF_RANGE);
+    }
+
+    g_sparseManifestValid = TRUE;
+    g_sparsePayloadSize = totalPayloadSize;
+
+    g_sensorOtaUdsSparsePayloadSize = totalPayloadSize;
+    g_sensorOtaUdsSparseVirtualSize = g_sparseManifest.virtualSize;
+    g_sensorOtaUdsSparseVirtualCrc32 = g_sparseManifest.virtualCrc32;
+    g_sensorOtaUdsSparseSegmentCount = g_sparseManifest.segmentCount;
+    g_sensorOtaUdsSparseGapFill = g_sparseManifest.gapFill;
+    g_sensorOtaUdsSparseManifestOkCount++;
+
+    /* Positive response: F4 segmentCount totalPayloadSize[BE] */
+    tx[0] = APP_SENSOR_OTA_GATEWAY_UDS_SID_SPARSE_MANIFEST +
+            APP_SENSOR_OTA_GATEWAY_UDS_POS_RESPONSE_OFFSET;
+    tx[1] = g_sparseManifest.segmentCount;
+    tx[2] = (uint8)((totalPayloadSize >> 24) & 0xFFU);
+    tx[3] = (uint8)((totalPayloadSize >> 16) & 0xFFU);
+    tx[4] = (uint8)((totalPayloadSize >> 8) & 0xFFU);
+    tx[5] = (uint8)(totalPayloadSize & 0xFFU);
+
+    return 6U;
+}
 
 static uint16 handleRequestDownload(uint8 *rx, uint16 rxLen, uint8 *tx)
 {
@@ -306,14 +534,6 @@ static uint16 handleRequestDownload(uint8 *rx, uint16 rxLen, uint8 *tx)
                                     APP_SENSOR_OTA_GATEWAY_UDS_NRC_CONDITIONS_NOT_CORRECT);
     }
 
-    /*
-     * 요청 형식:
-     *   [0] 0x34
-     *   [1] dataFormatId
-     *   [2] addrAndLengthFormatIdentifier
-     *   [3..] address
-     *   [...] size
-     */
     if(rxLen < 4U)
     {
         return makeNegativeResponse(tx,
@@ -338,11 +558,9 @@ static uint16 handleRequestDownload(uint8 *rx, uint16 rxLen, uint8 *tx)
                                     APP_SENSOR_OTA_GATEWAY_UDS_NRC_GENERAL_REJECT);
     }
 
-    /*
-     * Pi/HPC가 보낸 address는 ZCU local flash write에는 사용하지 않는다.
-     * 이 모듈은 Sensor ECU Gateway이므로 size만 사용한다.
-     */
+    /* Pi/HPC가 보낸 address는 ZCU local flash write에는 사용하지 않는다. */
     firmwareSize = 0U;
+
     for(i = 0U; i < sizeLen; i++)
     {
         firmwareSize = (firmwareSize << 8) | rx[3U + addrLen + i];
@@ -355,54 +573,61 @@ static uint16 handleRequestDownload(uint8 *rx, uint16 rxLen, uint8 *tx)
                                     APP_SENSOR_OTA_GATEWAY_UDS_NRC_REQUEST_OUT_OF_RANGE);
     }
 
+    if(g_sparseManifestValid == TRUE)
+    {
+        if(firmwareSize != g_sparsePayloadSize)
+        {
+            return makeNegativeResponse(tx,
+                                        APP_SENSOR_OTA_GATEWAY_UDS_SID_REQUEST_DOWNLOAD,
+                                        APP_SENSOR_OTA_GATEWAY_UDS_NRC_REQUEST_OUT_OF_RANGE);
+        }
+    }
+
     resetDownloadState();
 
     g_downloadSize = firmwareSize;
     g_sensorOtaUdsDownloadSize = firmwareSize;
 
-    /*
-     * Late CRC mode:
-     *  - Pi/HPC는 CRC를 마지막 0x37에서 준다.
-     *  - 따라서 여기서는 size만으로 Sensor ECU OTA를 시작한다.
-     */
-    startResult = AppOtaReceiver_StartDownloadWithoutCrc(firmwareSize, 0U);
-
-    if(startResult != pdPASS)
+    if(g_sparseManifestValid == TRUE)
     {
-        g_sensorOtaUdsStartNoCrcFailCount++;
+        startResult = AppOtaReceiver_StartSparseDownload(&g_sparseManifest, 0U);
 
-        return makeNegativeResponse(tx,
-                                    APP_SENSOR_OTA_GATEWAY_UDS_SID_REQUEST_DOWNLOAD,
-                                    APP_SENSOR_OTA_GATEWAY_UDS_NRC_CONDITIONS_NOT_CORRECT);
+        if(startResult != pdPASS)
+        {
+            g_sensorOtaUdsStartSparseFailCount++;
+            return makeNegativeResponse(tx,
+                                        APP_SENSOR_OTA_GATEWAY_UDS_SID_REQUEST_DOWNLOAD,
+                                        APP_SENSOR_OTA_GATEWAY_UDS_NRC_CONDITIONS_NOT_CORRECT);
+        }
+
+        g_sensorOtaUdsStartSparseOkCount++;
+    }
+    else
+    {
+        startResult = AppOtaReceiver_StartDownloadWithoutCrc(firmwareSize, 0U);
+
+        if(startResult != pdPASS)
+        {
+            g_sensorOtaUdsStartNoCrcFailCount++;
+            return makeNegativeResponse(tx,
+                                        APP_SENSOR_OTA_GATEWAY_UDS_SID_REQUEST_DOWNLOAD,
+                                        APP_SENSOR_OTA_GATEWAY_UDS_NRC_CONDITIONS_NOT_CORRECT);
+        }
+
+        g_sensorOtaUdsStartNoCrcOkCount++;
     }
 
-    g_sensorOtaUdsStartNoCrcOkCount++;
-
-    /*
-     * Sensor ECU 쪽 0x10/0x34가 끝나고 첫 block 요청 상태가 될 때까지 기다린다.
-     * 이 대기를 하지 않으면 HPC가 바로 0x36을 보냈을 때 Gateway가 아직 block 대기 상태가 아닐 수 있다.
-     */
+#if 0
     if(waitUntilWaitingBlock(APP_SENSOR_OTA_GATEWAY_WAIT_BLOCK_TIMEOUT_MS) == FALSE)
     {
         g_sensorOtaUdsWaitBlockTimeoutCount++;
-        if(AppOtaReceiver_IsError() == TRUE)
-        {
-        return makeNegativeResponse(tx,
-                                    APP_SENSOR_OTA_GATEWAY_UDS_SID_REQUEST_DOWNLOAD,
-                                    APP_SENSOR_OTA_GATEWAY_UDS_NRC_GENERAL_PROG_FAILURE);
-        }
+
         return makeNegativeResponse(tx,
                                     APP_SENSOR_OTA_GATEWAY_UDS_SID_REQUEST_DOWNLOAD,
                                     APP_SENSOR_OTA_GATEWAY_UDS_NRC_GENERAL_PROG_FAILURE);
     }
+#endif
 
-    /*
-     * Positive response:
-     *   0x74 0x20 maxBlockSizeHi maxBlockSizeLo
-     *
-     * 여기서 maxBlockSize = 34로 응답한다.
-     * 그러면 HPC는 data payload를 34 - 2 = 32 bytes 단위로 보낸다.
-     */
     tx[0] = APP_SENSOR_OTA_GATEWAY_UDS_SID_REQUEST_DOWNLOAD +
             APP_SENSOR_OTA_GATEWAY_UDS_POS_RESPONSE_OFFSET;
     tx[1] = 0x20U;
@@ -411,7 +636,6 @@ static uint16 handleRequestDownload(uint8 *rx, uint16 rxLen, uint8 *tx)
 
     return 4U;
 }
-
 
 static uint16 handleTransferData(uint8 *rx, uint16 rxLen, uint8 *tx)
 {
@@ -468,10 +692,6 @@ static uint16 handleTransferData(uint8 *rx, uint16 rxLen, uint8 *tx)
     requestedBlockIndex = AppOtaReceiver_GetRequestedBlockIndex();
     requestedLength = AppOtaReceiver_GetRequestedLength();
 
-    /*
-     * 마지막 block은 32보다 작을 수 있다.
-     * 따라서 App_OtaReceiver가 요구하는 length와 정확히 맞아야 한다.
-     */
     if(chunkLen != requestedLength)
     {
         return makeNegativeResponse(tx,
@@ -494,15 +714,11 @@ static uint16 handleTransferData(uint8 *rx, uint16 rxLen, uint8 *tx)
     }
 
     g_sensorOtaUdsProvideBlockOkCount++;
-
     g_sensorOtaUdsLastBlockIndex = requestedBlockIndex;
     g_sensorOtaUdsLastBlockLength = chunkLen;
 
-    /*
-     * Sensor ECU 쪽 0x36 응답까지 처리되어 다음 block 대기 상태 또는 WAIT_FINAL_CRC 상태가 될 때까지 기다린다.
-     */
     if(waitUntilBlockConsumedOrFinalCrc(requestedBlockIndex,
-                                    APP_SENSOR_OTA_GATEWAY_WAIT_NEXT_TIMEOUT_MS) == FALSE)
+                                        APP_SENSOR_OTA_GATEWAY_WAIT_NEXT_TIMEOUT_MS) == FALSE)
     {
         g_sensorOtaUdsWaitNextTimeoutCount++;
 
@@ -536,10 +752,6 @@ static uint16 handleTransferExit(uint8 *rx, uint16 rxLen, uint8 *tx)
 
     g_sensorOtaUdsTransferExitCount++;
 
-    /*
-     * 현재 HPC server.py 흐름 기준:
-     *   0x37 + CRC32(4 bytes)
-     */
     if(rxLen < 5U)
     {
         return makeNegativeResponse(tx,
@@ -561,6 +773,45 @@ static uint16 handleTransferExit(uint8 *rx, uint16 rxLen, uint8 *tx)
                                     APP_SENSOR_OTA_GATEWAY_UDS_NRC_CONDITIONS_NOT_CORRECT);
     }
 
+    expectedCrc = readU32Be(&rx[1]);
+
+    /*
+     * Sparse mode에서는 마지막 0x36 block 이후
+     * UdsOtaClient가 내부적으로 0x37/0x31 CRC까지 자동 진행해서
+     * AppOtaReceiver가 이미 DONE 상태가 될 수 있다.
+     *
+     * 이 경우 PC/HPC가 나중에 보내는 0x37은
+     * "이미 검증 완료된 CRC 확인 요청"으로 보고 0x77을 반환한다.
+     */
+    if((g_sparseManifestValid == TRUE) &&
+       (AppOtaReceiver_IsDone() == TRUE))
+    {
+        if(expectedCrc != g_sparseManifest.virtualCrc32)
+        {
+            return makeNegativeResponse(tx,
+                                        APP_SENSOR_OTA_GATEWAY_UDS_SID_TRANSFER_EXIT,
+                                        APP_SENSOR_OTA_GATEWAY_UDS_NRC_REQUEST_OUT_OF_RANGE);
+        }
+
+        g_expectedCrc32 = expectedCrc;
+        g_sensorOtaUdsExpectedCrc32 = expectedCrc;
+        g_sensorOtaUdsFinalCrcOkCount++;
+
+        tx[0] = APP_SENSOR_OTA_GATEWAY_UDS_SID_TRANSFER_EXIT +
+                APP_SENSOR_OTA_GATEWAY_UDS_POS_RESPONSE_OFFSET;
+
+        g_session = APP_SENSOR_OTA_GATEWAY_UDS_SESSION_DEFAULT;
+
+        resetDownloadState();
+        resetSparseManifestState();
+
+        return 1U;
+    }
+
+    /*
+     * Legacy late CRC path 또는 아직 DONE으로 가지 않은 sparse path.
+     * 이때만 WAIT_FINAL_CRC 상태를 요구한다.
+     */
     if(AppOtaReceiver_IsWaitingFinalCrc() == FALSE)
     {
         return makeNegativeResponse(tx,
@@ -568,18 +819,19 @@ static uint16 handleTransferExit(uint8 *rx, uint16 rxLen, uint8 *tx)
                                     APP_SENSOR_OTA_GATEWAY_UDS_NRC_CONDITIONS_NOT_CORRECT);
     }
 
-    expectedCrc = readU32Be(&rx[1]);
-    //expectedCrc = 0x12345678;  //debug
+    if(g_sparseManifestValid == TRUE)
+    {
+        if(expectedCrc != g_sparseManifest.virtualCrc32)
+        {
+            return makeNegativeResponse(tx,
+                                        APP_SENSOR_OTA_GATEWAY_UDS_SID_TRANSFER_EXIT,
+                                        APP_SENSOR_OTA_GATEWAY_UDS_NRC_REQUEST_OUT_OF_RANGE);
+        }
+    }
+
     g_expectedCrc32 = expectedCrc;
     g_sensorOtaUdsExpectedCrc32 = expectedCrc;
 
-    /*
-     * Late CRC mode의 마지막 단계.
-     * 이 호출 이후 Sensor ECU 쪽으로:
-     *   0x37 RequestTransferExit
-     *   0x31 RoutineControl CRC
-     * 가 진행된다.
-     */
     crcResult = AppOtaReceiver_SetFinalCrc(expectedCrc, 0U);
 
     if(crcResult != pdPASS)
@@ -614,12 +866,10 @@ static uint16 handleTransferExit(uint8 *rx, uint16 rxLen, uint8 *tx)
     tx[0] = APP_SENSOR_OTA_GATEWAY_UDS_SID_TRANSFER_EXIT +
             APP_SENSOR_OTA_GATEWAY_UDS_POS_RESPONSE_OFFSET;
 
-    /*
-     * Download/Verify phase 완료.
-     * Activation/SOTA switch는 아직 여기서 하지 않는다.
-     */
     g_session = APP_SENSOR_OTA_GATEWAY_UDS_SESSION_DEFAULT;
+
     resetDownloadState();
+    resetSparseManifestState();
 
     return 1U;
 }
@@ -628,46 +878,36 @@ static uint16 handleEcuReset(uint8 *rx, uint16 rxLen, uint8 *tx)
 {
     BaseType_t resetResult;
 
-    if (rxLen < 2U)
+    if(rxLen < 2U)
     {
         return makeNegativeResponse(tx,
                                     APP_SENSOR_OTA_GATEWAY_UDS_SID_ECU_RESET,
                                     APP_SENSOR_OTA_GATEWAY_UDS_NRC_GENERAL_REJECT);
     }
 
-    if (rx[1] != APP_SENSOR_OTA_GATEWAY_UDS_RESET_HARD_RESET)
+    if(rx[1] != APP_SENSOR_OTA_GATEWAY_UDS_RESET_HARD_RESET)
     {
         return makeNegativeResponse(tx,
                                     APP_SENSOR_OTA_GATEWAY_UDS_SID_ECU_RESET,
                                     APP_SENSOR_OTA_GATEWAY_UDS_NRC_REQUEST_OUT_OF_RANGE);
     }
 
-    /*
-     * Sensor ECU OTA download/verify가 끝난 뒤에만 reset 가능해야 한다.
-     * UdsOtaClient_RequestEcuReset() 내부에서 state == DONE인지 검사한다.
-     */
     resetResult = AppOtaReceiver_RequestSensorEcuReset(0U);
 
-    if (resetResult != pdPASS)
+    if(resetResult != pdPASS)
     {
         return makeNegativeResponse(tx,
                                     APP_SENSOR_OTA_GATEWAY_UDS_SID_ECU_RESET,
                                     APP_SENSOR_OTA_GATEWAY_UDS_NRC_CONDITIONS_NOT_CORRECT);
     }
 
-    /*
-     * 여기서의 0x51 응답은 "ZCU가 reset 요청을 접수했다"는 응답이다.
-     * 실제 Sensor ECU의 0x51은 UdsOtaClient 상태머신이 CAN 0x601로 받는다.
-     *
-     * 엄밀히는 Sensor ECU 0x51을 기다린 뒤 DoIP 0x51을 주는 게 맞지만,
-     * 테스트 단계에서는 접수 응답으로 먼저 확인해도 된다.
-     */
-    tx[0] = APP_SENSOR_OTA_GATEWAY_UDS_SID_ECU_RESET
-            + APP_SENSOR_OTA_GATEWAY_UDS_POS_RESPONSE_OFFSET;
+    tx[0] = APP_SENSOR_OTA_GATEWAY_UDS_SID_ECU_RESET +
+            APP_SENSOR_OTA_GATEWAY_UDS_POS_RESPONSE_OFFSET;
     tx[1] = rx[1];
 
     return 2U;
 }
+
 /* ============================================================
    Helper functions
    ============================================================ */
@@ -684,15 +924,13 @@ static uint16 makeNegativeResponse(uint8 *tx, uint8 sid, uint8 nrc)
     return 3U;
 }
 
-
 static uint32 readU32Be(const uint8 *p)
 {
     return ((uint32)p[0] << 24) |
            ((uint32)p[1] << 16) |
-           ((uint32)p[2] << 8)  |
+           ((uint32)p[2] << 8) |
            ((uint32)p[3]);
 }
-
 
 static boolean waitUntilWaitingBlock(uint32 timeoutMs)
 {
@@ -700,33 +938,15 @@ static boolean waitUntilWaitingBlock(uint32 timeoutMs)
 
     while(elapsedMs < timeoutMs)
     {
-        /*
-         * 새 StartDownload가 정상 처리되면 결국 WAIT_BLOCK으로 진입한다.
-         */
         if(AppOtaReceiver_IsWaitingBlock() == TRUE)
         {
             return TRUE;
         }
 
-        /*
-         * ERROR는 실제 실패로 본다.
-         */
         if(AppOtaReceiver_IsError() == TRUE)
         {
             return FALSE;
         }
-
-        /*
-         * 중요:
-         * 이전 OTA가 성공한 직후에는 AppOtaReceiver_IsDone()이 잠깐 TRUE로 남아 있을 수 있다.
-         *
-         * 기존 코드는 여기서 DONE을 실패로 처리했기 때문에,
-         * 새 0x34가 Sensor ECU까지 정상 전달되고 Sensor ECU가 0x74를 줬는데도
-         * ZCU가 PC에는 7F 34 72를 반환하는 문제가 발생했다.
-         *
-         * 따라서 WAIT_BLOCK 대기 중에는 DONE을 실패 조건으로 보지 않는다.
-         * 새 StartDownload가 실패해서 WAIT_BLOCK으로 못 가면 timeout으로 빠진다.
-         */
 
         vTaskDelay(pdMS_TO_TICKS(1U));
         elapsedMs++;
@@ -734,7 +954,6 @@ static boolean waitUntilWaitingBlock(uint32 timeoutMs)
 
     return FALSE;
 }
-
 
 static boolean waitUntilBlockConsumedOrFinalCrc(uint32 blockIndex, uint32 timeoutMs)
 {
@@ -746,6 +965,17 @@ static boolean waitUntilBlockConsumedOrFinalCrc(uint32 blockIndex, uint32 timeou
         if(AppOtaReceiver_IsError() == TRUE)
         {
             return FALSE;
+        }
+
+        /*
+         * Sparse mode에서는 마지막 block 이후
+         * UdsOtaClient가 내부적으로 37/31 CRC까지 진행해서
+         * 바로 DONE으로 갈 수 있다.
+         * 이 경우도 마지막 36 block은 성공으로 봐야 한다.
+         */
+        if(AppOtaReceiver_IsDone() == TRUE)
+        {
+            return TRUE;
         }
 
         if(AppOtaReceiver_IsWaitingFinalCrc() == TRUE)
@@ -770,7 +1000,6 @@ static boolean waitUntilBlockConsumedOrFinalCrc(uint32 blockIndex, uint32 timeou
     return FALSE;
 }
 
-
 static boolean waitUntilDoneOrError(uint32 timeoutMs)
 {
     uint32 elapsedMs = 0U;
@@ -794,7 +1023,6 @@ static boolean waitUntilDoneOrError(uint32 timeoutMs)
     return FALSE;
 }
 
-
 static void resetDownloadState(void)
 {
     g_downloadSize = 0U;
@@ -803,6 +1031,19 @@ static void resetDownloadState(void)
     g_expectedCrc32 = 0U;
 }
 
+static void resetSparseManifestState(void)
+{
+    memset(&g_sparseManifest, 0, sizeof(g_sparseManifest));
+
+    g_sparseManifestValid = FALSE;
+    g_sparsePayloadSize = 0U;
+
+    g_sensorOtaUdsSparsePayloadSize = 0U;
+    g_sensorOtaUdsSparseVirtualSize = 0U;
+    g_sensorOtaUdsSparseVirtualCrc32 = 0U;
+    g_sensorOtaUdsSparseSegmentCount = 0U;
+    g_sensorOtaUdsSparseGapFill = 0U;
+}
 
 static uint8 nextBlockSeq(uint8 currentSeq)
 {
@@ -812,4 +1053,69 @@ static uint8 nextBlockSeq(uint8 currentSeq)
     }
 
     return (uint8)(currentSeq + 1U);
+}
+
+static boolean validateSparseManifest(const UdsOtaClient_SparseManifest_t *manifest,
+                                      uint32 *totalPayloadSize)
+{
+    uint8 i;
+    uint32 total = 0U;
+    uint32 prevEnd = 0U;
+
+    if((manifest == NULL_PTR) || (totalPayloadSize == NULL_PTR))
+    {
+        return FALSE;
+    }
+
+    if((manifest->virtualSize == 0U) ||
+       (manifest->segmentCount == 0U) ||
+       (manifest->segmentCount > UDS_OTA_CLIENT_MAX_SEGMENTS) ||
+       (manifest->gapFill > 0xFFU))
+    {
+        return FALSE;
+    }
+
+    for(i = 0U; i < manifest->segmentCount; i++)
+    {
+        uint32 offset = manifest->segments[i].offset;
+        uint32 size = manifest->segments[i].size;
+        uint32 end = offset + size;
+
+        if(size == 0U)
+        {
+            return FALSE;
+        }
+
+        if(end < offset)
+        {
+            return FALSE;
+        }
+
+        if(end > manifest->virtualSize)
+        {
+            return FALSE;
+        }
+
+        if((i > 0U) && (offset < prevEnd))
+        {
+            return FALSE;
+        }
+
+        if((size % APP_SENSOR_OTA_GATEWAY_UDS_DATA_SIZE) != 0U)
+        {
+            return FALSE;
+        }
+
+        total += size;
+        prevEnd = end;
+    }
+
+    if(total == 0U)
+    {
+        return FALSE;
+    }
+
+    *totalPayloadSize = total;
+
+    return TRUE;
 }

@@ -54,7 +54,7 @@
  * 테스트 끝나면 반드시 0U로 바꿔두는 것을 추천.
  */
 #define APP_OTA_GATEWAY_AUTO_TEST_ENABLE          (0u)
-#define APP_OTA_GATEWAY_AUTO_START_DELAY_LOOPS    (1000u)
+#define APP_OTA_GATEWAY_AUTO_START_DELAY_LOOPS    (3000u)
 
 #define APP_OTA_GATEWAY_AUTO_TEST_SIZE            (64u)
 #define APP_OTA_GATEWAY_AUTO_TEST_CRC32           (0x778EB6E5U)
@@ -68,6 +68,7 @@ typedef enum
 {
     APP_OTA_GATEWAY_CMD_START_DOWNLOAD = 0,
     APP_OTA_GATEWAY_CMD_START_DOWNLOAD_NO_CRC,
+    APP_OTA_GATEWAY_CMD_START_SPARSE,
     APP_OTA_GATEWAY_CMD_PROVIDE_BLOCK,
     APP_OTA_GATEWAY_CMD_SET_FINAL_CRC,
     APP_OTA_GATEWAY_CMD_CANCEL,
@@ -78,15 +79,13 @@ typedef enum
 typedef struct
 {
     AppOtaGateway_CommandType_t type;
-
     uint32_t firmwareSize;
     uint32_t firmwareCrc32;
-
+    UdsOtaClient_SparseManifest_t sparseManifest;
     uint32_t blockIndex;
-    uint8_t  blockLength;
-    uint8_t  blockData[UDS_OTA_CLIENT_TRANSFER_DATA_SIZE];
+    uint8_t blockLength;
+    uint8_t blockData[UDS_OTA_CLIENT_TRANSFER_DATA_SIZE];
 } AppOtaGateway_Command_t;
-
 
 /* ============================================================
    Private variables
@@ -136,6 +135,10 @@ volatile uint32_t g_appOtaReqDownloadNoCrcCallCount    = 0U;
 volatile uint32_t g_appOtaReqDownloadNoCrcQueuedCount  = 0U;
 volatile uint32_t g_appOtaReqDownloadNoCrcFailCount    = 0U;
 
+volatile uint32_t g_appOtaReqSparseDownloadCallCount    = 0U;
+volatile uint32_t g_appOtaReqSparseDownloadQueuedCount  = 0U;
+volatile uint32_t g_appOtaReqSparseDownloadFailCount    = 0U;
+
 volatile uint32_t g_appOtaProvideBlockCallCount   = 0U;
 volatile uint32_t g_appOtaProvideBlockQueuedCount = 0U;
 volatile uint32_t g_appOtaProvideBlockFailCount   = 0U;
@@ -152,6 +155,7 @@ volatile uint32_t g_appOtaCmdProcessCallCount     = 0U;
 volatile uint32_t g_appOtaCmdProcessedCount       = 0U;
 volatile uint32_t g_appOtaCmdStartProcessedCount  = 0U;
 volatile uint32_t g_appOtaCmdStartNoCrcProcessedCount = 0U;
+volatile uint32_t g_appOtaCmdStartSparseProcessedCount = 0U;
 volatile uint32_t g_appOtaCmdBlockProcessedCount  = 0U;
 volatile uint32_t g_appOtaCmdSetFinalCrcProcessedCount = 0U;
 volatile uint32_t g_appOtaCmdCancelProcessedCount = 0U;
@@ -167,6 +171,9 @@ volatile uint32_t g_appOtaGatewayStartFailCount   = 0U;
 
 volatile uint32_t g_appOtaGatewayStartNoCrcOkCount   = 0U;
 volatile uint32_t g_appOtaGatewayStartNoCrcFailCount = 0U;
+
+volatile uint32_t g_appOtaGatewayStartSparseOkCount   = 0U;
+volatile uint32_t g_appOtaGatewayStartSparseFailCount = 0U;
 
 volatile uint32_t g_appOtaGatewayBlockOkCount     = 0U;
 volatile uint32_t g_appOtaGatewayBlockFailCount   = 0U;
@@ -187,6 +194,10 @@ volatile uint32_t g_appOtaGatewaySetFinalCrcFailCount = 0U;
  *  - Watch에서 g_appOtaDebugStartNoCrcRequest = 1 로 변경
  *    → App_OtaGateway task 문맥에서 AppOtaGateway_RequestDownloadWithoutCrc() 호출
  *
+ *  - Watch에서 g_appOtaDebugStartSparseRequest = 1 로 변경
+ *    → App_OtaGateway task 문맥에서 AppOtaGateway_RequestSparseDownload() 호출
+ *    → sparse manifest 기준으로 Sensor ECU에 10 02, 34 segment0 요청
+ *
  *  - WAIT_BLOCK 상태 진입 후 Watch에서 g_appOtaDebugBlock0Request = 1 로 변경
  *    → App_OtaGateway task 문맥에서 AppOtaGateway_ProvideBlock() 호출
  *
@@ -206,6 +217,10 @@ volatile uint32_t g_appOtaDebugStartNoCrcRequest   = 0U;
 volatile uint32_t g_appOtaDebugStartNoCrcDoneCount = 0U;
 volatile BaseType_t g_appOtaDebugStartNoCrcResult  = pdFAIL;
 
+volatile uint32_t g_appOtaDebugStartSparseRequest   = 0U;
+volatile uint32_t g_appOtaDebugStartSparseDoneCount = 0U;
+volatile BaseType_t g_appOtaDebugStartSparseResult  = pdFAIL;
+
 volatile uint32_t g_appOtaDebugBlock0Request   = 0U;
 volatile uint32_t g_appOtaDebugBlock0DoneCount = 0U;
 volatile BaseType_t g_appOtaDebugBlock0Result  = pdFAIL;
@@ -220,6 +235,30 @@ volatile uint32_t g_appOtaDebugFinalCrc32        = 0x778EB6E5U;
 volatile uint32_t g_appOtaDebugCancelRequest   = 0U;
 volatile uint32_t g_appOtaDebugCancelDoneCount = 0U;
 volatile BaseType_t g_appOtaDebugCancelResult  = pdFAIL;
+
+/*
+ * Sparse OTA smoke test용 manifest.
+ *
+ * 이 값은 PCAN 직접 테스트에서 성공한 sensor-ecu make_segments.ps1 결과 기준이다.
+ * firmware를 다시 빌드해서 CRC/segment size가 바뀌면 이 값도 반드시 같이 바꿔야 한다.
+ *
+ * 목적:
+ * - ZCU가 Sensor ECU에 10 02, 34 segment0 offset/size까지 보내고
+ *   WAIT_BLOCK 상태로 들어가는지 확인한다.
+ */
+static const UdsOtaClient_SparseManifest_t g_appOtaTestSparseManifest =
+{
+    .virtualSize = 0x002DE160U,
+    .virtualCrc32 = 0x0B4597E5U,
+    .segmentCount = 2U,
+    .gapFill = 0x00U,
+    .segments =
+    {
+        { .offset = 0x00000000U, .size = 0x00009EE0U },
+        { .offset = 0x002DE020U, .size = 0x00000140U }
+    }
+};
+
 
 /*
  * 테스트용 32-byte block.
@@ -377,6 +416,40 @@ BaseType_t AppOtaGateway_RequestDownloadWithoutCrc(uint32_t firmwareSize,
     else
     {
         g_appOtaReqDownloadNoCrcFailCount++;
+    }
+
+    return result;
+}
+
+
+BaseType_t AppOtaGateway_RequestSparseDownload(const UdsOtaClient_SparseManifest_t *manifest,
+                                               TickType_t waitTicks)
+{
+    AppOtaGateway_Command_t cmd;
+    BaseType_t result;
+
+    g_appOtaReqSparseDownloadCallCount++;
+
+    if((g_appOtaCmdQueue == NULL) || (manifest == NULL_PTR))
+    {
+        g_appOtaReqSparseDownloadFailCount++;
+        return pdFAIL;
+    }
+
+    memset(&cmd, 0, sizeof(cmd));
+
+    cmd.type = APP_OTA_GATEWAY_CMD_START_SPARSE;
+    memcpy(&cmd.sparseManifest, manifest, sizeof(UdsOtaClient_SparseManifest_t));
+
+    result = xQueueSend(g_appOtaCmdQueue, &cmd, waitTicks);
+
+    if(result == pdPASS)
+    {
+        g_appOtaReqSparseDownloadQueuedCount++;
+    }
+    else
+    {
+        g_appOtaReqSparseDownloadFailCount++;
     }
 
     return result;
@@ -681,6 +754,27 @@ static void AppOtaGateway_ProcessDebugTrigger(void)
         g_appOtaDebugStartNoCrcDoneCount++;
     }
 
+    if(g_appOtaDebugStartSparseRequest != 0U)
+    {
+        /*
+         * 한 번만 실행되도록 먼저 0으로 내린다.
+         *
+         * 기대 흐름:
+         *  - 0x600: 10 02
+         *  - 0x601: 50 02
+         *  - 0x600: 34 00 44 00 00 00 00 E0 9E 00 00
+         *  - 0x601: 74 ...
+         *  - 이후 WAIT_BLOCK 상태 진입
+         */
+        g_appOtaDebugStartSparseRequest = 0U;
+
+        g_appOtaDebugStartSparseResult =
+            AppOtaGateway_RequestSparseDownload(&g_appOtaTestSparseManifest,
+                                                0U);
+
+        g_appOtaDebugStartSparseDoneCount++;
+    }
+
     if(g_appOtaDebugBlock0Request != 0U)
     {
         /*
@@ -727,59 +821,54 @@ static void AppOtaGateway_ProcessDebugTrigger(void)
 static void AppOtaGateway_ProcessAutoTest(void)
 {
 #if (APP_OTA_GATEWAY_AUTO_TEST_ENABLE == 1u)
-    uint32_t requestedBlockIndex;
-    uint8_t requestedLength;
-
     g_appOtaAutoTestLoopCount++;
 
     /*
-     * 1단계:
-     * 부팅 후 일정 loop가 지나면 OTA_START를 자동으로 1회 요청한다.
+     * Sparse smoke test:
      *
-     * 기대 결과:
-     *  - g_appOtaAutoStartRequestCount = 1
-     *  - g_appOtaAutoStartResult = pdPASS
-     *  - PCAN에서 0x600 / 10 02 확인
+     * Watch에서 변수 값을 바꾸기 어려운 환경을 위해,
+     * 부팅 후 일정 loop가 지나면 sparse OTA start를 자동으로 1회 요청한다.
+     *
+     * 이번 단계의 목표:
+     *  - ZCU가 Sensor ECU에 10 02 전송
+     *  - Sensor ECU가 50 02 응답
+     *  - ZCU가 segment0 기준 0x34 RequestDownload 전송
+     *  - Sensor ECU가 0x74 응답
+     *  - 이후 ZCU가 WAIT_BLOCK 상태로 진입
+     *
+     * 기대 CAN 흐름:
+     *  - 0x600: 10 02
+     *  - 0x601: 50 02
+     *  - 0x600: 34 00 44 00 00 00 00 E0 9E 00 00
+     *  - 0x601: 74 ...
+     *
+     * 주의:
+     *  - 0x34 응답은 Sensor ECU inactive slot erase 때문에 늦게 올 수 있다.
+     *  - 60초까지 기다리는 것이 정상이다.
      */
     if((g_appOtaAutoStartRequestCount == 0U) &&
        (g_appOtaAutoTestLoopCount >= APP_OTA_GATEWAY_AUTO_START_DELAY_LOOPS))
     {
         g_appOtaAutoStartResult =
-            AppOtaGateway_RequestDownload(APP_OTA_GATEWAY_AUTO_TEST_SIZE,
-                                          APP_OTA_GATEWAY_AUTO_TEST_CRC32,
-                                          0U);
+            AppOtaGateway_RequestSparseDownload(&g_appOtaTestSparseManifest,
+                                                0U);
 
         g_appOtaAutoStartRequestCount++;
     }
 
     /*
-     * 2단계:
-     * UdsOtaClient가 WAIT_BLOCK 상태가 되면 현재 요청 block을 자동 제공한다.
+     * 지금 단계에서는 block 자동 제공 금지.
      *
-     * firmwareSize=64이면 block 0, block 1 두 번 제공된다.
+     * 이유:
+     *  - g_appOtaDebugBlockData는 실제 segment1.bin 데이터가 아니라
+     *    00 01 02 ... 1F 더미 데이터다.
+     *  - 이 데이터를 보내면 Sensor ECU inactive slot에 잘못된 데이터가 써진다.
+     *  - 이번 테스트 목표는 10/34/74/WAIT_BLOCK 확인까지만이다.
+     *
+     * 실제 segment1.bin/segment2.bin block 공급은 다음 단계에서 별도로 붙인다.
      */
-    if(OtaGateway_IsWaitingBlock() == TRUE)
-    {
-        requestedBlockIndex = OtaGateway_GetRequestedBlockIndex();
-        requestedLength = OtaGateway_GetRequestedLength();
-
-        if((requestedLength > 0U) &&
-           (requestedLength <= UDS_OTA_CLIENT_TRANSFER_DATA_SIZE) &&
-           (g_appOtaAutoLastProvidedBlockIndex != requestedBlockIndex))
-        {
-            g_appOtaAutoBlockResult =
-                AppOtaGateway_ProvideBlock(requestedBlockIndex,
-                                           g_appOtaDebugBlockData,
-                                           requestedLength,
-                                           0U);
-
-            g_appOtaAutoLastProvidedBlockIndex = requestedBlockIndex;
-            g_appOtaAutoBlockRequestCount++;
-        }
-    }
 #endif
 }
-
 
 static void AppOtaGateway_ProcessCommands(void)
 {
@@ -842,6 +931,26 @@ static void AppOtaGateway_ProcessCommands(void)
                 else
                 {
                     g_appOtaGatewayStartNoCrcFailCount++;
+                }
+
+                break;
+            }
+
+            case APP_OTA_GATEWAY_CMD_START_SPARSE:
+            {
+                g_appOtaCmdStartSparseProcessedCount++;
+                g_appOtaLastCmdFirmwareSize = cmd.sparseManifest.virtualSize;
+                g_appOtaLastCmdFirmwareCrc32 = cmd.sparseManifest.virtualCrc32;
+
+                gatewayResult = OtaGateway_StartSparse(&cmd.sparseManifest);
+
+                if(gatewayResult == OTA_GATEWAY_RESULT_OK)
+                {
+                    g_appOtaGatewayStartSparseOkCount++;
+                }
+                else
+                {
+                    g_appOtaGatewayStartSparseFailCount++;
                 }
 
                 break;

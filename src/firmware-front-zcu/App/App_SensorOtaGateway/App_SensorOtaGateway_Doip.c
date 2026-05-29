@@ -33,6 +33,7 @@
 #include "lwip/opt.h"
 #include "lwip/tcp.h"
 #include "lwip/mem.h"
+#include "lwip/priv/tcp_priv.h"
 
 /* ============================================================
    Private variables
@@ -66,6 +67,18 @@ volatile uint32 g_sensorOtaDoipLastUdsSid = 0U;
 volatile uint32 g_sensorOtaDoipLastUdsReqLen = 0U;
 volatile uint32 g_sensorOtaDoipLastUdsResLen = 0U;
 
+volatile uint32 g_sensorOtaDoipTcpNewFailCount = 0U;
+volatile sint32 g_sensorOtaDoipTcpBindErr = 0;
+volatile uint32 g_sensorOtaDoipTcpListenFailCount = 0U;
+volatile uint32 g_sensorOtaDoipTcpListenOkCount = 0U;
+
+volatile uint32 g_dbgLwipMemSize = 0U;
+volatile uint32 g_dbgLwipMempNumTcpPcb = 0U;
+volatile uint32 g_dbgLwipMempNumTcpPcbListen = 0U;
+
+volatile uint32 g_dbgTcpActiveCount = 0U;
+volatile uint32 g_dbgTcpTimeWaitCount = 0U;
+volatile uint32 g_dbgTcpListenCount = 0U;
 /* ============================================================
    Private prototypes
    ============================================================ */
@@ -109,6 +122,9 @@ static void AppSensorOtaGatewayDoip_BuildHeader(uint8 *buf,
                                                 uint16 payloadType,
                                                 uint32 payloadLen);
 
+static uint32 AppSensorOtaGatewayDoip_CountTcpPcbList(struct tcp_pcb *pcb);
+
+static uint32 AppSensorOtaGatewayDoip_CountTcpListenPcbList(struct tcp_pcb_listen *pcb);
 /* ============================================================
    Public functions
    ============================================================ */
@@ -116,8 +132,31 @@ static void AppSensorOtaGatewayDoip_BuildHeader(uint8 *buf,
 void AppSensorOtaGatewayDoip_Init(void)
 {
     err_t err;
+    tcpPcb2 *listenPcb;
+
+    if(g_sensorOtaDoipBindOkCount > 0U)
+    {
+        return;
+    }
 
     g_sensorOtaDoipInitCount++;
+
+    g_dbgLwipMemSize = MEM_SIZE;
+    g_dbgLwipMempNumTcpPcb = MEMP_NUM_TCP_PCB;
+    g_dbgLwipMempNumTcpPcbListen = MEMP_NUM_TCP_PCB_LISTEN;
+
+    /*
+     * tcp_new() 호출 직전의 lwIP TCP PCB 사용량을 확인한다.
+     * 이 값으로 13401 서버 생성 실패 원인이 PCB 고갈인지 판단한다.
+     */
+    g_dbgTcpActiveCount =
+        AppSensorOtaGatewayDoip_CountTcpPcbList(tcp_active_pcbs);
+
+    g_dbgTcpTimeWaitCount =
+        AppSensorOtaGatewayDoip_CountTcpPcbList(tcp_tw_pcbs);
+
+    g_dbgTcpListenCount =
+        AppSensorOtaGatewayDoip_CountTcpListenPcbList(tcp_listen_pcbs.pcbs);
 
     /*
      * UDS adapter도 함께 초기화한다.
@@ -126,28 +165,74 @@ void AppSensorOtaGatewayDoip_Init(void)
 
     g_sensorOtaDoipPcb = tcp_new();
 
-    if(g_sensorOtaDoipPcb != NULL)
+    if(g_sensorOtaDoipPcb == NULL)
     {
-        err = tcp_bind(g_sensorOtaDoipPcb,
-                       IP_ADDR_ANY,
-                       APP_SENSOR_OTA_GATEWAY_DOIP_PORT);
-
-        if(err == ERR_OK)
-        {
-            g_sensorOtaDoipPcb = tcp_listen(g_sensorOtaDoipPcb);
-            tcp_accept(g_sensorOtaDoipPcb, AppSensorOtaGatewayDoip_Accept);
-
-            g_sensorOtaDoipBindOkCount++;
-        }
-        else
-        {
-            g_sensorOtaDoipBindFailCount++;
-        }
-    }
-    else
-    {
+        g_sensorOtaDoipTcpNewFailCount++;
         g_sensorOtaDoipBindFailCount++;
+        return;
     }
+
+    err = tcp_bind(g_sensorOtaDoipPcb,
+                   IP_ADDR_ANY,
+                   APP_SENSOR_OTA_GATEWAY_DOIP_PORT);
+
+    if(err != ERR_OK)
+    {
+        g_sensorOtaDoipTcpBindErr = (sint32)err;
+        g_sensorOtaDoipBindFailCount++;
+
+        tcp_close(g_sensorOtaDoipPcb);
+        g_sensorOtaDoipPcb = NULL;
+
+        return;
+    }
+
+    listenPcb = tcp_listen(g_sensorOtaDoipPcb);
+
+    if(listenPcb == NULL)
+    {
+        g_sensorOtaDoipTcpListenFailCount++;
+        g_sensorOtaDoipBindFailCount++;
+
+        tcp_close(g_sensorOtaDoipPcb);
+        g_sensorOtaDoipPcb = NULL;
+
+        return;
+    }
+
+    g_sensorOtaDoipPcb = listenPcb;
+
+    tcp_accept(g_sensorOtaDoipPcb, AppSensorOtaGatewayDoip_Accept);
+
+    g_sensorOtaDoipTcpListenOkCount++;
+    g_sensorOtaDoipBindOkCount++;
+}
+
+
+static uint32 AppSensorOtaGatewayDoip_CountTcpPcbList(struct tcp_pcb *pcb)
+{
+    uint32 count = 0U;
+
+    while(pcb != NULL)
+    {
+        count++;
+        pcb = pcb->next;
+    }
+
+    return count;
+}
+
+static uint32 AppSensorOtaGatewayDoip_CountTcpListenPcbList(struct tcp_pcb_listen *pcb)
+{
+    uint32 count = 0U;
+
+    while(pcb != NULL)
+    {
+        count++;
+        pcb = pcb->next;
+    }
+
+    return count;
 }
 
 /* ============================================================
@@ -580,6 +665,10 @@ static void AppSensorOtaGatewayDoip_BuildHeader(uint8 *buf,
     buf[7] = (uint8)(payloadLen & 0xFFU);
 }
 
+boolean AppSensorOtaGatewayDoip_IsReady(void)
+{
+    return (g_sensorOtaDoipBindOkCount > 0U) ? TRUE : FALSE;
+}
 
 static void AppSensorOtaGatewayDoip_SendRaw(tcpPcb2 *tpcb,
                                             uint8 *buf,

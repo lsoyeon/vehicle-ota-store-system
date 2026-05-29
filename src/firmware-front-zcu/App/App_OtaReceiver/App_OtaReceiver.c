@@ -101,7 +101,6 @@ volatile uint32_t g_appOtaReceiverCancelFailCount = 0U;
 
 volatile BaseType_t g_appOtaReceiverLastResult = pdFAIL;
 
-
 /* ============================================================
    Self test debug variables
    ============================================================ */
@@ -123,7 +122,9 @@ volatile BaseType_t g_appOtaReceiverSelfTestBlockResult = pdFAIL;
 volatile uint32_t g_appOtaReceiverSelfTestLastBlockIndex = 0xFFFFFFFFU;
 volatile uint8_t  g_appOtaReceiverSelfTestLastBlockLength = 0U;
 
-
+volatile uint32_t g_appOtaReceiverStartSparseCallCount = 0U;
+volatile uint32_t g_appOtaReceiverStartSparseOkCount = 0U;
+volatile uint32_t g_appOtaReceiverStartSparseFailCount = 0U;
 /*
  * 테스트용 32-byte block.
  *
@@ -187,6 +188,10 @@ void AppOtaReceiver_Init(void)
     g_appOtaReceiverLastResult = pdFAIL;
 
     g_appOtaReceiverInitialized = TRUE;
+
+    g_appOtaReceiverStartSparseCallCount = 0U;
+    g_appOtaReceiverStartSparseOkCount = 0U;
+    g_appOtaReceiverStartSparseFailCount = 0U;
 
 #if (APP_OTA_RECEIVER_SELF_TEST_ENABLE == 1u)
     if(g_appOtaReceiverSelfTestTaskCreated == FALSE)
@@ -283,6 +288,53 @@ BaseType_t AppOtaReceiver_StartDownloadWithoutCrc(uint32_t firmwareSize,
     return result;
 }
 
+BaseType_t AppOtaReceiver_StartSparseDownload(const UdsOtaClient_SparseManifest_t *manifest,
+                                              TickType_t waitTicks)
+{
+    BaseType_t result;
+    uint32_t totalPayloadSize = 0U;
+    uint8_t i;
+
+    g_appOtaReceiverStartSparseCallCount++;
+
+    if((g_appOtaReceiverInitialized == FALSE) || (manifest == NULL_PTR))
+    {
+        g_appOtaReceiverStartSparseFailCount++;
+        g_appOtaReceiverLastResult = pdFAIL;
+        return pdFAIL;
+    }
+
+    if((manifest->segmentCount == 0U) ||
+       (manifest->segmentCount > UDS_OTA_CLIENT_MAX_SEGMENTS))
+    {
+        g_appOtaReceiverStartSparseFailCount++;
+        g_appOtaReceiverLastResult = pdFAIL;
+        return pdFAIL;
+    }
+
+    for(i = 0U; i < manifest->segmentCount; i++)
+    {
+        totalPayloadSize += manifest->segments[i].size;
+    }
+
+    g_appOtaReceiverLastFirmwareSize = totalPayloadSize;
+    g_appOtaReceiverLastFirmwareCrc32 = manifest->virtualCrc32;
+
+    result = AppOtaGateway_RequestSparseDownload(manifest, waitTicks);
+
+    g_appOtaReceiverLastResult = result;
+
+    if(result == pdPASS)
+    {
+        g_appOtaReceiverStartSparseOkCount++;
+    }
+    else
+    {
+        g_appOtaReceiverStartSparseFailCount++;
+    }
+
+    return result;
+}
 
 BaseType_t AppOtaReceiver_SetFinalCrc(uint32_t firmwareCrc32,
                                       TickType_t waitTicks)

@@ -28,7 +28,7 @@
 
 #include "Ifx_Types.h"
 #include "FreeRTOS.h"
-
+#include "UdsOtaClient.h"
 #include <stdint.h>
 
 /* ============================================================
@@ -139,6 +139,9 @@ BaseType_t AppOtaGateway_Cancel(TickType_t waitTicks);
 
 //0x11 단계에서 ECU Reset 요청 (jump to app)
 BaseType_t AppOtaGateway_RequestSensorEcuReset(TickType_t waitTicks);
+
+BaseType_t AppOtaGateway_RequestSparseDownload(const UdsOtaClient_SparseManifest_t *manifest,
+                                               TickType_t waitTicks);
 
 /* ============================================================
    상태 확인 API

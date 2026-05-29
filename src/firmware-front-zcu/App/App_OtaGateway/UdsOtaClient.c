@@ -1,51 +1,28 @@
 /**********************************************************************************************************************
  * \file UdsOtaClient.c
- * \brief ZCU UDS-style OTA Client over CAN FD - Streaming only version for FreeRTOS App_Can
+ * \brief ZCU UDS-style OTA Client over CAN FD - Streaming + Sparse Segment version for FreeRTOS App_Can
  *
  * 역할:
- *  - ZCU가 Sensor ECU로 UDS OTA Request 송신
- *  - Sensor ECU의 0x601 UDS Response 수신 후 상태머신 진행
- *
- * 구조:
- *  - UdsOtaClient는 MCMCAN/CanIf를 직접 사용하지 않는다.
- *  - 팀원 RTOS 구조의 App_Can API를 사용한다.
+ * - ZCU가 Sensor ECU로 UDS OTA Request 송신
+ * - Sensor ECU의 0x601 UDS Response 수신 후 상태머신 진행
  *
  * CAN:
- *  - TX: 0x600 UDS Request  ZCU -> Sensor ECU, CAN FD
- *  - RX: 0x601 UDS Response Sensor ECU -> ZCU, CAN FD
+ * - TX: 0x600 UDS Request  ZCU -> Sensor ECU, CAN FD
+ * - RX: 0x601 UDS Response Sensor ECU -> ZCU, CAN FD
  *
- * 주의:
- *  - UdsOtaClient_OnResponse()는 response copy + flag set만 수행한다.
- *  - 실제 다음 request 송신과 timeout 처리는 UdsOtaClient_MainFunction()에서 수행한다.
+ * 지원:
+ * - Legacy single stream OTA
+ * - Sparse segment OTA
  *
- * Streaming Gateway 구조:
- *  - ZCU는 전체 firmware binary를 저장하지 않는다.
- *  - ZCU는 firmwareSize / 현재 32-byte block만 보관한다.
- *  - CRC32는 두 가지 모드를 지원한다.
- *
- * CRC 모드:
- *  1. 기존 모드
- *     - UdsOtaClient_StartStream(firmwareSize, crc32)
- *     - OTA 시작 시점에 CRC32를 이미 알고 있다.
- *
- *  2. Late CRC 모드
- *     - UdsOtaClient_StartStreamWithoutCrc(firmwareSize)
- *     - Pi/HPC -> ZCU DoIP 흐름처럼 CRC32가 마지막 0x37에서 들어오는 경우 사용한다.
- *     - 모든 block 전송 완료 후 WAIT_FINAL_CRC 상태에서 대기한다.
- *     - 이후 UdsOtaClient_SetFinalCrc(crc32)가 호출되면
- *       Sensor ECU 쪽 RequestTransferExit + RoutineControl CRC를 진행한다.
- *
- * Download Phase:
- *  - 0x10 DiagnosticSessionControl
- *  - 0x34 RequestDownload
- *  - 0x36 TransferData
- *  - 0x37 RequestTransferExit
- *  - 0x31 RoutineControl CRC32
- *  - CRC 성공 후 DONE
+ * Sparse OTA 흐름:
+ * - 0x10 DiagnosticSessionControl
+ * - segment0: 0x34 RequestDownload(offset/size) -> 0x36 TransferData 반복 -> 0x37 TransferExit
+ * - segment1: 0x34 RequestDownload(offset/size) -> 0x36 TransferData 반복 -> 0x37 TransferExit
+ * - 0x31 RoutineControl CRC32
+ * - 필요 시 0x11 ECUReset은 상위 계층이 UdsOtaClient_RequestEcuReset()으로 요청
  *********************************************************************************************************************/
 
 #include "UdsOtaClient.h"
-
 #include "App_Can/App_Can.h"
 
 #include "FreeRTOS.h"
@@ -54,108 +31,18 @@
 #include <string.h>
 
 /* ============================================================
-   Fallback UDS define
-   can_type_def.h에 이미 있으면 아래 define은 사용되지 않음
-   ============================================================ */
-
-#ifndef UDS_SID_DIAGNOSTIC_SESSION_CONTROL
-#define UDS_SID_DIAGNOSTIC_SESSION_CONTROL  0x10U
-#endif
-
-#ifndef UDS_SID_ECU_RESET
-#define UDS_SID_ECU_RESET                   0x11U
-#endif
-
-#ifndef UDS_SID_ROUTINE_CONTROL
-#define UDS_SID_ROUTINE_CONTROL             0x31U
-#endif
-
-#ifndef UDS_SID_REQUEST_DOWNLOAD
-#define UDS_SID_REQUEST_DOWNLOAD            0x34U
-#endif
-
-#ifndef UDS_SID_TRANSFER_DATA
-#define UDS_SID_TRANSFER_DATA               0x36U
-#endif
-
-#ifndef UDS_SID_REQUEST_TRANSFER_EXIT
-#define UDS_SID_REQUEST_TRANSFER_EXIT       0x37U
-#endif
-
-#ifndef UDS_SID_NEGATIVE_RESPONSE
-#define UDS_SID_NEGATIVE_RESPONSE           0x7FU
-#endif
-
-#ifndef UDS_POSITIVE_RESPONSE_OFFSET
-#define UDS_POSITIVE_RESPONSE_OFFSET        0x40U
-#endif
-
-#ifndef UDS_SESSION_PROGRAMMING
-#define UDS_SESSION_PROGRAMMING             0x02U
-#endif
-
-#ifndef UDS_DOWNLOAD_DATA_FORMAT_ID
-#define UDS_DOWNLOAD_DATA_FORMAT_ID         0x00U
-#endif
-
-#ifndef UDS_DOWNLOAD_ADDR_LEN_FORMAT
-#define UDS_DOWNLOAD_ADDR_LEN_FORMAT        0x44U
-#endif
-
-#ifndef UDS_ROUTINE_START
-#define UDS_ROUTINE_START                   0x01U
-#endif
-
-#ifndef UDS_ROUTINE_ID_CHECK_CRC32
-#define UDS_ROUTINE_ID_CHECK_CRC32          0x0202U
-#endif
-
-#ifndef UDS_RESET_JUMP_TO_APP
-#define UDS_RESET_JUMP_TO_APP               0x01U
-#endif
-
-#ifndef UDS_REQ_LEN_DIAGNOSTIC_SESSION_CONTROL
-#define UDS_REQ_LEN_DIAGNOSTIC_SESSION_CONTROL   2U
-#endif
-
-#ifndef UDS_REQ_LEN_REQUEST_DOWNLOAD
-#define UDS_REQ_LEN_REQUEST_DOWNLOAD             11U
-#endif
-
-#ifndef UDS_REQ_LEN_TRANSFER_DATA_MIN
-#define UDS_REQ_LEN_TRANSFER_DATA_MIN            3U
-#endif
-
-#ifndef UDS_REQ_LEN_REQUEST_TRANSFER_EXIT
-#define UDS_REQ_LEN_REQUEST_TRANSFER_EXIT        1U
-#endif
-
-#ifndef UDS_REQ_LEN_ROUTINE_CONTROL_CHECK_CRC32
-#define UDS_REQ_LEN_ROUTINE_CONTROL_CHECK_CRC32  8U
-#endif
-
-#ifndef UDS_REQ_LEN_ECU_RESET
-#define UDS_REQ_LEN_ECU_RESET                    2U
-#endif
-
-
-/* ============================================================
    OTA behavior option
    ============================================================ */
 
 /*
- * Dual Slot / Bank B OTA 구조에서는
- * CRC 검증 성공 후 바로 ECUReset(0x11)을 보내지 않는다.
- *
  * 0U:
  *   Download Phase는 CRC 검증에서 DONE 처리.
- *   Activation은 사용자 승인 후 별도 Routine/Slot switch로 수행.
+ *   Activation/reset은 사용자 승인 후 UdsOtaClient_RequestEcuReset()으로 별도 수행.
  *
  * 1U:
- *   기존 Single Slot 방식처럼 CRC 성공 후 ECUReset(0x11) 자동 송신.
+ *   CRC 성공 후 ECUReset(0x11)을 자동 송신.
  */
-#define UDS_OTA_CLIENT_AUTO_RESET_AFTER_CRC    0U
-
+#define UDS_OTA_CLIENT_AUTO_RESET_AFTER_CRC 0U
 
 /* ============================================================
    Internal state
@@ -170,12 +57,12 @@ static uint32_t g_firmwareCrc32 = 0U;
  * CRC 제공 여부.
  *
  * 기존 모드:
- *  - StartStream(size, crc)에서 TRUE
+ * - StartStream(size, crc)에서 TRUE
  *
  * Late CRC 모드:
- *  - StartStreamWithoutCrc(size)에서 FALSE
- *  - 모든 block 전송 후 WAIT_FINAL_CRC에서 대기
- *  - SetFinalCrc(crc) 호출 시 TRUE
+ * - StartStreamWithoutCrc(size)에서 FALSE
+ * - 모든 block 전송 후 WAIT_FINAL_CRC에서 대기
+ * - SetFinalCrc(crc) 호출 시 TRUE
  */
 static boolean g_finalCrcProvided = FALSE;
 
@@ -192,6 +79,22 @@ static uint8_t g_responseLength = 0U;
 static uint8_t g_streamBlockBuffer[UDS_OTA_CLIENT_TRANSFER_DATA_SIZE];
 static uint8_t g_streamBlockLength = 0U;
 static boolean g_streamBlockReady = FALSE;
+
+/*
+ * Sparse OTA state
+ *
+ * g_firmwareSize:
+ * - legacy mode: 전체 firmwareSize
+ * - sparse mode: 실제 전송 payload 총합(segment size 합)
+ *
+ * g_firmwareCrc32:
+ * - legacy mode: image CRC
+ * - sparse mode: virtual image CRC
+ */
+static boolean g_sparseMode = FALSE;
+static UdsOtaClient_SparseManifest_t g_sparseManifest;
+static uint8_t g_currentSegmentIndex = 0U;
+static uint32_t g_currentPayloadBaseOffset = 0U;
 
 /* debug counter */
 volatile uint32_t g_dbgTdRespEnterCount = 0U;
@@ -218,7 +121,6 @@ static void clearResponse(void);
 static boolean fetchResponse(uint8_t *buffer, uint8_t *length);
 
 static uint8_t positiveResponseSid(uint8_t requestSid);
-
 static uint16_t readU16Le(const uint8_t *p);
 static uint32_t readU32Le(const uint8_t *p);
 static void writeU16Le(uint8_t *p, uint16_t value);
@@ -246,13 +148,20 @@ static void sendEcuReset(void);
 static void handleEcuResetResponse(void);
 
 static boolean checkTimeout(uint32_t timeoutTicks);
-
 static uint32_t calcTotalBlocks(uint32_t size);
 static uint8_t calcCurrentBlockLength(void);
-
 static void proceedAfterAllBlocksSent(void);
 static void updateFinalCrcDebugFlag(void);
 
+static boolean validateSparseManifest(const UdsOtaClient_SparseManifest_t *manifest);
+static uint32_t getCurrentTransferOffset(void);
+static uint32_t getCurrentTransferSize(void);
+static uint32_t getCurrentSegmentBlockCount(void);
+static uint32_t getExpectedPayloadOffset(void);
+static uint32_t getExpectedGlobalBlockIndex(void);
+static void loadCurrentSegmentDebug(void);
+static void moveToNextSegment(void);
+static uint32_t getTotalSparsePayloadSize(const UdsOtaClient_SparseManifest_t *manifest);
 
 /* ============================================================
    Public API
@@ -262,7 +171,6 @@ void UdsOtaClient_Init(void)
 {
     UdsOtaClient_Reset();
 }
-
 
 void UdsOtaClient_Reset(void)
 {
@@ -282,26 +190,30 @@ void UdsOtaClient_Reset(void)
     g_streamBlockLength = 0U;
     g_streamBlockReady = FALSE;
 
+    g_sparseMode = FALSE;
+    memset(&g_sparseManifest, 0, sizeof(g_sparseManifest));
+    g_currentSegmentIndex = 0U;
+    g_currentPayloadBaseOffset = 0U;
+
     g_clientDebug.state = UDS_OTA_CLIENT_STATE_IDLE;
     g_clientDebug.lastResult = UDS_OTA_CLIENT_RESULT_OK;
     g_clientDebug.targetAddress = UDS_OTA_CLIENT_TARGET_APP_ADDR;
     g_clientDebug.finalCrcProvided = g_finalCrcProvided;
 
+    g_clientDebug.sparseMode = FALSE;
+    g_clientDebug.segmentCount = 0U;
+    g_clientDebug.currentSegmentIndex = 0U;
+    g_clientDebug.currentSegmentOffset = 0U;
+    g_clientDebug.currentSegmentSize = 0U;
+    g_clientDebug.currentPayloadBaseOffset = 0U;
+
     taskEXIT_CRITICAL();
 }
 
-
 /*
  * Streaming mode 시작 - CRC known.
- *
- * ZCU는 전체 firmware buffer를 넘기지 않는다.
- * firmwareSize와 crc32만 알고 시작한다.
- *
- * 이후 UdsOtaClient가 WAIT_STREAM_BLOCK 상태가 되면
- * 상위 계층이 UdsOtaClient_ProvideStreamBlock()으로 현재 block을 제공한다.
  */
-UdsOtaClient_Result_t UdsOtaClient_StartStream(uint32_t firmwareSize,
-                                               uint32_t crc32)
+UdsOtaClient_Result_t UdsOtaClient_StartStream(uint32_t firmwareSize, uint32_t crc32)
 {
     if (firmwareSize == 0U)
     {
@@ -328,6 +240,8 @@ UdsOtaClient_Result_t UdsOtaClient_StartStream(uint32_t firmwareSize,
     g_clientDebug.sentBytes = 0U;
     g_clientDebug.currentBsc = 0x01U;
     g_clientDebug.lastProgressPercent = 0U;
+
+    loadCurrentSegmentDebug();
     updateFinalCrcDebugFlag();
 
     setState(UDS_OTA_CLIENT_STATE_SEND_DIAGNOSTIC_SESSION);
@@ -335,15 +249,8 @@ UdsOtaClient_Result_t UdsOtaClient_StartStream(uint32_t firmwareSize,
     return UDS_OTA_CLIENT_RESULT_OK;
 }
 
-
 /*
  * Streaming mode 시작 - CRC later.
- *
- * Pi/HPC -> ZCU DoIP 흐름에서 CRC32가 마지막 0x37에서 들어오는 경우 사용한다.
- *
- * 모든 block 전송 완료 후 WAIT_FINAL_CRC 상태에서 대기한다.
- * 이후 UdsOtaClient_SetFinalCrc(crc32)가 호출되면
- * RequestTransferExit + RoutineControl CRC를 진행한다.
  */
 UdsOtaClient_Result_t UdsOtaClient_StartStreamWithoutCrc(uint32_t firmwareSize)
 {
@@ -372,6 +279,8 @@ UdsOtaClient_Result_t UdsOtaClient_StartStreamWithoutCrc(uint32_t firmwareSize)
     g_clientDebug.sentBytes = 0U;
     g_clientDebug.currentBsc = 0x01U;
     g_clientDebug.lastProgressPercent = 0U;
+
+    loadCurrentSegmentDebug();
     updateFinalCrcDebugFlag();
 
     setState(UDS_OTA_CLIENT_STATE_SEND_DIAGNOSTIC_SESSION);
@@ -379,16 +288,70 @@ UdsOtaClient_Result_t UdsOtaClient_StartStreamWithoutCrc(uint32_t firmwareSize)
     return UDS_OTA_CLIENT_RESULT_OK;
 }
 
+/*
+ * Sparse segment mode 시작.
+ */
+UdsOtaClient_Result_t UdsOtaClient_StartSparse(const UdsOtaClient_SparseManifest_t *manifest)
+{
+    uint32_t totalPayloadSize;
+
+    if (manifest == NULL_PTR)
+    {
+        return UDS_OTA_CLIENT_RESULT_INVALID_PARAM;
+    }
+
+    if (validateSparseManifest(manifest) == FALSE)
+    {
+        return UDS_OTA_CLIENT_RESULT_INVALID_PARAM;
+    }
+
+    if (UdsOtaClient_IsBusy() == TRUE)
+    {
+        return UDS_OTA_CLIENT_RESULT_BUSY;
+    }
+
+    UdsOtaClient_Reset();
+
+    memcpy(&g_sparseManifest, manifest, sizeof(g_sparseManifest));
+
+    totalPayloadSize = getTotalSparsePayloadSize(&g_sparseManifest);
+
+    g_sparseMode = TRUE;
+    g_currentSegmentIndex = 0U;
+    g_currentPayloadBaseOffset = 0U;
+
+    /*
+     * g_firmwareSize는 실제 CAN으로 전송할 payload 총량이다.
+     * virtualSize는 Sensor ECU Bootloader CRC metadata 기준이며,
+     * ZCU block 요청 offset 계산에는 직접 사용하지 않는다.
+     */
+    g_firmwareSize = totalPayloadSize;
+    g_firmwareCrc32 = g_sparseManifest.virtualCrc32;
+    g_finalCrcProvided = TRUE;
+
+    g_clientDebug.firmwareSize = totalPayloadSize;
+    g_clientDebug.firmwareCrc32 = g_sparseManifest.virtualCrc32;
+    g_clientDebug.targetAddress = g_sparseManifest.segments[0U].offset;
+    g_clientDebug.totalBlocks = calcTotalBlocks(totalPayloadSize);
+    g_clientDebug.currentBlockIndex = 0U;
+    g_clientDebug.currentOffset = 0U;
+    g_clientDebug.sentBytes = 0U;
+    g_clientDebug.currentBsc = 0x01U;
+    g_clientDebug.lastProgressPercent = 0U;
+
+    g_clientDebug.sparseMode = TRUE;
+    g_clientDebug.segmentCount = g_sparseManifest.segmentCount;
+
+    loadCurrentSegmentDebug();
+    updateFinalCrcDebugFlag();
+
+    setState(UDS_OTA_CLIENT_STATE_SEND_DIAGNOSTIC_SESSION);
+
+    return UDS_OTA_CLIENT_RESULT_OK;
+}
 
 /*
  * Late CRC mode에서 최종 CRC32 설정.
- *
- * 호출 조건:
- *  - 모든 block 전송 완료
- *  - UdsOtaClient_IsWaitingFinalCrc() == TRUE
- *
- * 주의:
- *  - crc32 == 0x00000000도 이론상 유효한 CRC일 수 있으므로 reject하지 않는다.
  */
 UdsOtaClient_Result_t UdsOtaClient_SetFinalCrc(uint32_t crc32)
 {
@@ -399,8 +362,8 @@ UdsOtaClient_Result_t UdsOtaClient_SetFinalCrc(uint32_t crc32)
 
     g_firmwareCrc32 = crc32;
     g_finalCrcProvided = TRUE;
-
     g_clientDebug.firmwareCrc32 = crc32;
+
     updateFinalCrcDebugFlag();
 
     /*
@@ -412,15 +375,11 @@ UdsOtaClient_Result_t UdsOtaClient_SetFinalCrc(uint32_t crc32)
     return UDS_OTA_CLIENT_RESULT_OK;
 }
 
-
 UdsOtaClient_Result_t UdsOtaClient_RequestEcuReset(void)
 {
     /*
      * Sensor ECU 쪽 0x31 RoutineControl CRC까지 끝난 뒤에만
      * activation reset을 허용한다.
-     *
-     * 현재 Sensor ECU는 0x31 이후 CRC_VERIFIED / READY_TO_ACTIVATE 상태가 되고,
-     * 0x11을 받으면 reset하도록 수정한 구조다.
      */
     if (g_clientDebug.state != UDS_OTA_CLIENT_STATE_DONE)
     {
@@ -435,10 +394,10 @@ UdsOtaClient_Result_t UdsOtaClient_RequestEcuReset(void)
 /*
  * 현재 요청된 stream block을 제공한다.
  *
- * 호출 조건:
- *  - UdsOtaClient_IsWaitingStreamBlock() == TRUE
- *  - blockIndex == UdsOtaClient_GetRequestedBlockIndex()
- *  - length == UdsOtaClient_GetRequestedBlockLength()
+ * Sparse mode에서는 blockIndex가 전체 payload stream 기준 global block index다.
+ * 예:
+ * - segment0 1271 blocks
+ * - segment1 첫 block global index = 1271
  */
 UdsOtaClient_Result_t UdsOtaClient_ProvideStreamBlock(uint32_t blockIndex,
                                                       const uint8_t *data,
@@ -456,7 +415,7 @@ UdsOtaClient_Result_t UdsOtaClient_ProvideStreamBlock(uint32_t blockIndex,
         return UDS_OTA_CLIENT_RESULT_ERROR;
     }
 
-    if (blockIndex != g_clientDebug.currentBlockIndex)
+    if (blockIndex != getExpectedGlobalBlockIndex())
     {
         return UDS_OTA_CLIENT_RESULT_ERROR;
     }
@@ -480,7 +439,6 @@ UdsOtaClient_Result_t UdsOtaClient_ProvideStreamBlock(uint32_t blockIndex,
 
     return UDS_OTA_CLIENT_RESULT_OK;
 }
-
 
 void UdsOtaClient_MainFunction(void)
 {
@@ -523,7 +481,6 @@ void UdsOtaClient_MainFunction(void)
         {
             /*
              * 상위 계층이 UdsOtaClient_ProvideStreamBlock()을 호출할 때까지 대기.
-             * 이 상태에서는 CAN request를 보내지 않는다.
              */
             break;
         }
@@ -542,15 +499,6 @@ void UdsOtaClient_MainFunction(void)
 
         case UDS_OTA_CLIENT_STATE_WAIT_FINAL_CRC:
         {
-            /*
-             * Late CRC mode 전용.
-             *
-             * 모든 firmware block 전송이 끝난 상태.
-             * Pi/HPC가 0x37 단계에서 CRC32를 주면
-             * 상위 계층이 UdsOtaClient_SetFinalCrc()를 호출한다.
-             *
-             * 여기서는 CAN request를 보내지 않고 대기한다.
-             */
             break;
         }
 
@@ -598,13 +546,8 @@ void UdsOtaClient_MainFunction(void)
     }
 }
 
-
 /*
  * Sensor ECU에서 온 0x601 response를 전달받는 함수.
- *
- * App_Can은 0x601의 의미를 해석하지 않는다.
- * App_OtaGateway 쪽에서 AppCan_RecvById(CAN_ID_OTA_RESPONSE, ...)로 받은 뒤
- * 이 함수에 넘기는 구조로 사용한다.
  */
 void UdsOtaClient_OnResponse(const uint8_t *data, uint8_t length)
 {
@@ -636,18 +579,15 @@ void UdsOtaClient_OnResponse(const uint8_t *data, uint8_t length)
     taskEXIT_CRITICAL();
 }
 
-
 UdsOtaClient_State_t UdsOtaClient_GetState(void)
 {
     return g_clientDebug.state;
 }
 
-
 UdsOtaClient_Result_t UdsOtaClient_GetLastResult(void)
 {
     return g_clientDebug.lastResult;
 }
-
 
 boolean UdsOtaClient_IsBusy(void)
 {
@@ -663,64 +603,55 @@ boolean UdsOtaClient_IsBusy(void)
     return busy;
 }
 
-
 boolean UdsOtaClient_IsDone(void)
 {
     return (g_clientDebug.state == UDS_OTA_CLIENT_STATE_DONE) ? TRUE : FALSE;
 }
-
 
 boolean UdsOtaClient_IsError(void)
 {
     return (g_clientDebug.state == UDS_OTA_CLIENT_STATE_ERROR) ? TRUE : FALSE;
 }
 
-
 boolean UdsOtaClient_IsWaitingStreamBlock(void)
 {
     return (g_clientDebug.state == UDS_OTA_CLIENT_STATE_WAIT_STREAM_BLOCK) ? TRUE : FALSE;
 }
-
 
 boolean UdsOtaClient_IsWaitingFinalCrc(void)
 {
     return (g_clientDebug.state == UDS_OTA_CLIENT_STATE_WAIT_FINAL_CRC) ? TRUE : FALSE;
 }
 
-
 uint32_t UdsOtaClient_GetRequestedBlockIndex(void)
 {
-    return g_clientDebug.currentBlockIndex;
+    return getExpectedGlobalBlockIndex();
 }
-
 
 uint32_t UdsOtaClient_GetRequestedOffset(void)
 {
-    return g_clientDebug.currentBlockIndex * UDS_OTA_CLIENT_TRANSFER_DATA_SIZE;
+    return getExpectedPayloadOffset();
 }
-
 
 uint8_t UdsOtaClient_GetRequestedBlockLength(void)
 {
     return calcCurrentBlockLength();
 }
 
-
 uint8_t UdsOtaClient_GetProgress(void)
 {
     return (uint8_t)g_clientDebug.lastProgressPercent;
 }
-
 
 void UdsOtaClient_GetDebugInfo(UdsOtaClient_DebugInfo_t *info)
 {
     if (info != NULL_PTR)
     {
         g_clientDebug.finalCrcProvided = g_finalCrcProvided;
+        loadCurrentSegmentDebug();
         memcpy(info, &g_clientDebug, sizeof(UdsOtaClient_DebugInfo_t));
     }
 }
-
 
 /* ============================================================
    State helpers
@@ -733,11 +664,11 @@ static void setState(UdsOtaClient_State_t state)
     updateFinalCrcDebugFlag();
 }
 
-
 static void setError(UdsOtaClient_Result_t result)
 {
     g_clientDebug.lastResult = result;
     g_clientDebug.state = UDS_OTA_CLIENT_STATE_ERROR;
+
     updateFinalCrcDebugFlag();
 
     if (result == UDS_OTA_CLIENT_RESULT_TIMEOUT)
@@ -750,7 +681,6 @@ static void setError(UdsOtaClient_Result_t result)
     }
 }
 
-
 static boolean checkTimeout(uint32_t timeoutTicks)
 {
     if ((g_clientDebug.tickCount - g_clientDebug.stateEnterTick) > timeoutTicks)
@@ -762,12 +692,10 @@ static boolean checkTimeout(uint32_t timeoutTicks)
     return FALSE;
 }
 
-
 static void updateFinalCrcDebugFlag(void)
 {
     g_clientDebug.finalCrcProvided = g_finalCrcProvided;
 }
-
 
 /* ============================================================
    Response buffer helpers
@@ -783,7 +711,6 @@ static void clearResponse(void)
 
     taskEXIT_CRITICAL();
 }
-
 
 static boolean fetchResponse(uint8_t *buffer, uint8_t *length)
 {
@@ -812,7 +739,6 @@ static boolean fetchResponse(uint8_t *buffer, uint8_t *length)
     return result;
 }
 
-
 /* ============================================================
    Utility
    ============================================================ */
@@ -822,13 +748,11 @@ static uint8_t positiveResponseSid(uint8_t requestSid)
     return (uint8_t)(requestSid + UDS_POSITIVE_RESPONSE_OFFSET);
 }
 
-
 static uint16_t readU16Le(const uint8_t *p)
 {
     return ((uint16_t)p[0]) |
            ((uint16_t)p[1] << 8);
 }
-
 
 static uint32_t readU32Le(const uint8_t *p)
 {
@@ -838,13 +762,11 @@ static uint32_t readU32Le(const uint8_t *p)
            ((uint32_t)p[3] << 24);
 }
 
-
 static void writeU16Le(uint8_t *p, uint16_t value)
 {
     p[0] = (uint8_t)(value & 0xFFU);
     p[1] = (uint8_t)((value >> 8) & 0xFFU);
 }
-
 
 static void writeU32Le(uint8_t *p, uint32_t value)
 {
@@ -853,7 +775,6 @@ static void writeU32Le(uint8_t *p, uint32_t value)
     p[2] = (uint8_t)((value >> 16) & 0xFFU);
     p[3] = (uint8_t)((value >> 24) & 0xFFU);
 }
-
 
 static void makePayload(uint8_t *p, uint8_t fill)
 {
@@ -870,7 +791,6 @@ static void makePayload(uint8_t *p, uint8_t fill)
     }
 }
 
-
 static boolean sendPayload(const uint8_t *payload, uint8_t length)
 {
     BaseType_t txResult;
@@ -883,8 +803,8 @@ static boolean sendPayload(const uint8_t *payload, uint8_t length)
 
     /*
      * Team RTOS 구조:
-     *  - UdsOtaClient는 MCMCAN/CanIf를 직접 사용하지 않는다.
-     *  - App_Can raw CAN FD 송신 API를 통해 0x600 UDS Request를 보낸다.
+     * - UdsOtaClient는 MCMCAN/CanIf를 직접 사용하지 않는다.
+     * - App_Can raw CAN FD 송신 API를 통해 0x600 UDS Request를 보낸다.
      */
     txResult = AppCan_SendFd(CAN_ID_OTA_REQUEST, payload, length);
 
@@ -898,7 +818,6 @@ static boolean sendPayload(const uint8_t *payload, uint8_t length)
 
     return TRUE;
 }
-
 
 static uint32_t calcTotalBlocks(uint32_t size)
 {
@@ -914,25 +833,27 @@ static uint32_t calcTotalBlocks(uint32_t size)
     return blocks;
 }
 
-
 static uint8_t calcCurrentBlockLength(void)
 {
     uint32_t offset;
     uint32_t remain;
+    uint32_t currentTransferSize;
 
-    if (g_firmwareSize == 0U)
+    currentTransferSize = getCurrentTransferSize();
+
+    if (currentTransferSize == 0U)
     {
         return 0U;
     }
 
     offset = g_clientDebug.currentBlockIndex * UDS_OTA_CLIENT_TRANSFER_DATA_SIZE;
 
-    if (offset >= g_firmwareSize)
+    if (offset >= currentTransferSize)
     {
         return 0U;
     }
 
-    remain = g_firmwareSize - offset;
+    remain = currentTransferSize - offset;
 
     if (remain >= UDS_OTA_CLIENT_TRANSFER_DATA_SIZE)
     {
@@ -942,17 +863,22 @@ static uint8_t calcCurrentBlockLength(void)
     return (uint8_t)(remain & 0xFFU);
 }
 
-
 static void proceedAfterAllBlocksSent(void)
 {
     /*
-     * 기존 CRC known 모드:
-     *   StartStream(size, crc)로 시작했으면 CRC를 이미 알고 있으므로
-     *   바로 RequestTransferExit로 진행한다.
+     * 모든 block을 보낸 뒤 다음 단계로 이동한다.
      *
-     * Late CRC 모드:
-     *   StartStreamWithoutCrc(size)로 시작했으면
-     *   Pi/HPC가 0x37에서 CRC32를 줄 때까지 WAIT_FINAL_CRC에서 대기한다.
+     * Legacy CRC-known mode:
+     *   - 바로 RequestTransferExit(0x37) 전송
+     *
+     * Legacy late-CRC mode:
+     *   - 상위 계층이 최종 CRC를 넣을 때까지 WAIT_FINAL_CRC에서 대기
+     *   - UdsOtaClient_SetFinalCrc()가 호출되면 0x37 전송
+     *
+     * Sparse mode:
+     *   - StartSparse()에서 virtual CRC를 이미 알고 있으므로
+     *     segment마다 바로 0x37을 전송한다.
+     *   - 0x37 응답 이후 다음 segment가 있으면 다시 0x34로 이동한다.
      */
     if (g_finalCrcProvided == TRUE)
     {
@@ -964,6 +890,181 @@ static void proceedAfterAllBlocksSent(void)
     }
 }
 
+/* ============================================================
+   Sparse helper
+   ============================================================ */
+
+static uint32_t getTotalSparsePayloadSize(const UdsOtaClient_SparseManifest_t *manifest)
+{
+    uint32_t total = 0U;
+    uint8_t i;
+
+    if (manifest == NULL_PTR)
+    {
+        return 0U;
+    }
+
+    for (i = 0U; i < manifest->segmentCount; i++)
+    {
+        total += manifest->segments[i].size;
+    }
+
+    return total;
+}
+
+static boolean validateSparseManifest(const UdsOtaClient_SparseManifest_t *manifest)
+{
+    uint8_t i;
+    uint32_t prevEnd = 0U;
+
+    if (manifest == NULL_PTR)
+    {
+        return FALSE;
+    }
+
+    if ((manifest->segmentCount == 0U) ||
+        (manifest->segmentCount > UDS_OTA_CLIENT_MAX_SEGMENTS))
+    {
+        return FALSE;
+    }
+
+    if (manifest->virtualSize == 0U)
+    {
+        return FALSE;
+    }
+
+    if (manifest->gapFill > 0xFFU)
+    {
+        return FALSE;
+    }
+
+    for (i = 0U; i < manifest->segmentCount; i++)
+    {
+        uint32_t offset = manifest->segments[i].offset;
+        uint32_t size = manifest->segments[i].size;
+        uint32_t end = offset + size;
+
+        if (size == 0U)
+        {
+            return FALSE;
+        }
+
+        if (end < offset)
+        {
+            return FALSE;
+        }
+
+        if (end > manifest->virtualSize)
+        {
+            return FALSE;
+        }
+
+        if ((i > 0U) && (offset < prevEnd))
+        {
+            return FALSE;
+        }
+
+        /*
+         * 현재 Sensor ECU 테스트 스크립트와 FlashOta는 32-byte block 단위 전송을 전제로 한다.
+         */
+        if ((size % UDS_OTA_CLIENT_TRANSFER_DATA_SIZE) != 0U)
+        {
+            return FALSE;
+        }
+
+        prevEnd = end;
+    }
+
+    return TRUE;
+}
+
+static uint32_t getCurrentTransferOffset(void)
+{
+    if (g_sparseMode == TRUE)
+    {
+        return g_sparseManifest.segments[g_currentSegmentIndex].offset;
+    }
+
+    return UDS_OTA_CLIENT_TARGET_APP_ADDR;
+}
+
+static uint32_t getCurrentTransferSize(void)
+{
+    if (g_sparseMode == TRUE)
+    {
+        return g_sparseManifest.segments[g_currentSegmentIndex].size;
+    }
+
+    return g_firmwareSize;
+}
+
+static uint32_t getCurrentSegmentBlockCount(void)
+{
+    return calcTotalBlocks(getCurrentTransferSize());
+}
+
+static uint32_t getExpectedPayloadOffset(void)
+{
+    return g_currentPayloadBaseOffset +
+           (g_clientDebug.currentBlockIndex * UDS_OTA_CLIENT_TRANSFER_DATA_SIZE);
+}
+
+static uint32_t getExpectedGlobalBlockIndex(void)
+{
+    return getExpectedPayloadOffset() / UDS_OTA_CLIENT_TRANSFER_DATA_SIZE;
+}
+
+static void loadCurrentSegmentDebug(void)
+{
+    g_clientDebug.sparseMode = g_sparseMode;
+
+    if (g_sparseMode == TRUE)
+    {
+        g_clientDebug.currentSegmentIndex = g_currentSegmentIndex;
+        g_clientDebug.segmentCount = g_sparseManifest.segmentCount;
+        g_clientDebug.currentSegmentOffset =
+            g_sparseManifest.segments[g_currentSegmentIndex].offset;
+        g_clientDebug.currentSegmentSize =
+            g_sparseManifest.segments[g_currentSegmentIndex].size;
+        g_clientDebug.currentPayloadBaseOffset = g_currentPayloadBaseOffset;
+        g_clientDebug.targetAddress =
+            g_sparseManifest.segments[g_currentSegmentIndex].offset;
+    }
+    else
+    {
+        g_clientDebug.currentSegmentIndex = 0U;
+        g_clientDebug.segmentCount = 1U;
+        g_clientDebug.currentSegmentOffset = UDS_OTA_CLIENT_TARGET_APP_ADDR;
+        g_clientDebug.currentSegmentSize = g_firmwareSize;
+        g_clientDebug.currentPayloadBaseOffset = 0U;
+        g_clientDebug.targetAddress = UDS_OTA_CLIENT_TARGET_APP_ADDR;
+    }
+}
+
+static void moveToNextSegment(void)
+{
+    uint32_t prevSize;
+
+    if (g_sparseMode == FALSE)
+    {
+        return;
+    }
+
+    prevSize = g_sparseManifest.segments[g_currentSegmentIndex].size;
+
+    g_currentPayloadBaseOffset += prevSize;
+    g_currentSegmentIndex++;
+
+    g_clientDebug.currentBlockIndex = 0U;
+    g_clientDebug.currentBsc = 0x01U;
+    g_clientDebug.currentOffset = g_currentPayloadBaseOffset;
+
+    g_streamBlockReady = FALSE;
+    g_streamBlockLength = 0U;
+    memset(g_streamBlockBuffer, 0, sizeof(g_streamBlockBuffer));
+
+    loadCurrentSegmentDebug();
+}
 
 /* ============================================================
    UDS send / response handlers
@@ -982,11 +1083,11 @@ static void sendDiagnosticSessionControl(void)
 
     if (sendPayload(p, UDS_REQ_LEN_DIAGNOSTIC_SESSION_CONTROL) == TRUE)
     {
-        g_clientDebug.lastExpectedSid = positiveResponseSid(UDS_SID_DIAGNOSTIC_SESSION_CONTROL);
+        g_clientDebug.lastExpectedSid =
+            positiveResponseSid(UDS_SID_DIAGNOSTIC_SESSION_CONTROL);
         setState(UDS_OTA_CLIENT_STATE_WAIT_DIAGNOSTIC_SESSION);
     }
 }
-
 
 static void handleDiagnosticSessionResponse(void)
 {
@@ -1017,29 +1118,43 @@ static void handleDiagnosticSessionResponse(void)
     }
 }
 
-
 static void sendRequestDownload(void)
 {
     uint8_t p[CANFD_MAX_DLC];
+    uint32_t downloadOffset;
+    uint32_t downloadSize;
 
     makePayload(p, 0x00U);
+
+    downloadOffset = getCurrentTransferOffset();
+    downloadSize = getCurrentTransferSize();
 
     p[0] = UDS_SID_REQUEST_DOWNLOAD;
     p[1] = UDS_DOWNLOAD_DATA_FORMAT_ID;
     p[2] = UDS_DOWNLOAD_ADDR_LEN_FORMAT;
 
-    writeU32Le(&p[3], UDS_OTA_CLIENT_TARGET_APP_ADDR);
-    writeU32Le(&p[7], g_firmwareSize);
+    /*
+     * Sparse mode:
+     *   address field = segment offset
+     *
+     * Legacy mode:
+     *   address field = UDS_OTA_CLIENT_TARGET_APP_ADDR
+     */
+    writeU32Le(&p[3], downloadOffset);
+    writeU32Le(&p[7], downloadSize);
+
+    g_clientDebug.targetAddress = downloadOffset;
+    loadCurrentSegmentDebug();
 
     clearResponse();
 
     if (sendPayload(p, UDS_REQ_LEN_REQUEST_DOWNLOAD) == TRUE)
     {
-        g_clientDebug.lastExpectedSid = positiveResponseSid(UDS_SID_REQUEST_DOWNLOAD);
+        g_clientDebug.lastExpectedSid =
+            positiveResponseSid(UDS_SID_REQUEST_DOWNLOAD);
         setState(UDS_OTA_CLIENT_STATE_WAIT_REQUEST_DOWNLOAD);
     }
 }
-
 
 static void handleRequestDownloadResponse(void)
 {
@@ -1049,17 +1164,27 @@ static void handleRequestDownloadResponse(void)
 
     if (fetchResponse(resp, &len) == FALSE)
     {
-        (void)checkTimeout(UDS_OTA_CLIENT_TIMEOUT_TICKS);
+        (void)checkTimeout(UDS_OTA_CLIENT_REQUEST_DOWNLOAD_TIMEOUT_TICKS);
         return;
     }
 
     if ((len >= 3U) && (resp[0] == UDS_SID_NEGATIVE_RESPONSE))
     {
+        /*
+         * NRC 0x78: ResponsePending
+         * Sensor ECU가 erase 중이라고 알려주는 경우 계속 기다린다.
+         */
+        if (resp[2] == 0x78U)
+        {
+            return;
+        }
+
         setError(UDS_OTA_CLIENT_RESULT_NEGATIVE_RESPONSE);
         return;
     }
 
-    if ((len >= 4U) && (resp[0] == positiveResponseSid(UDS_SID_REQUEST_DOWNLOAD)))
+    if ((len >= 4U) &&
+        (resp[0] == positiveResponseSid(UDS_SID_REQUEST_DOWNLOAD)))
     {
         maxBlockLength = readU16Le(&resp[2]);
 
@@ -1077,21 +1202,21 @@ static void handleRequestDownloadResponse(void)
     }
 }
 
-
 static void sendTransferData(void)
 {
     uint8_t p[CANFD_MAX_DLC];
-    uint32_t offset;
+    uint32_t segmentBlockCount;
     uint8_t dataLen;
     uint8_t i;
 
-    if (g_clientDebug.currentBlockIndex >= g_clientDebug.totalBlocks)
+    segmentBlockCount = getCurrentSegmentBlockCount();
+
+    if (g_clientDebug.currentBlockIndex >= segmentBlockCount)
     {
         proceedAfterAllBlocksSent();
         return;
     }
 
-    offset = g_clientDebug.currentBlockIndex * UDS_OTA_CLIENT_TRANSFER_DATA_SIZE;
     dataLen = calcCurrentBlockLength();
 
     if (dataLen == 0U)
@@ -1122,16 +1247,18 @@ static void sendTransferData(void)
         p[2U + i] = g_streamBlockBuffer[i];
     }
 
-    g_clientDebug.currentOffset = offset;
+    g_clientDebug.currentOffset = getExpectedPayloadOffset();
 
     clearResponse();
 
     if (sendPayload(p, (uint8_t)(2U + dataLen)) == TRUE)
     {
-        g_clientDebug.lastExpectedSid = positiveResponseSid(UDS_SID_TRANSFER_DATA);
+        g_clientDebug.lastExpectedSid =
+            positiveResponseSid(UDS_SID_TRANSFER_DATA);
         setState(UDS_OTA_CLIENT_STATE_WAIT_TRANSFER_DATA);
     }
 }
+
 static void handleTransferDataResponse(void)
 {
     uint8_t resp[CANFD_MAX_DLC];
@@ -1139,15 +1266,9 @@ static void handleTransferDataResponse(void)
 
     g_dbgTdRespEnterCount++;
 
-    /*
-     * 1. 먼저 response가 있는지 확인
-     *    response가 없을 때만 timeout 검사
-     */
     if (fetchResponse(resp, &len) == FALSE)
     {
-        const TickType_t timeoutTicks = UDS_OTA_CLIENT_TRANSFER_TIMEOUT_TICKS;
-
-        if (checkTimeout(timeoutTicks) == TRUE)
+        if (checkTimeout(UDS_OTA_CLIENT_TRANSFER_TIMEOUT_TICKS) == TRUE)
         {
             g_dbgTdRespTimeoutCount++;
         }
@@ -1155,32 +1276,20 @@ static void handleTransferDataResponse(void)
         return;
     }
 
-    /*
-     * 여기까지 왔으면 0x601 response는 실제로 UdsOtaClient까지 들어온 것
-     */
     g_dbgTdRespFetchOkCount++;
-
     g_dbgTdRespLen = len;
     g_dbgTdResp0 = resp[0];
     g_dbgTdResp1 = (len > 1U) ? resp[1] : 0U;
     g_dbgTdExpectedBsc = g_clientDebug.currentBsc;
 
-    /*
-     * Negative Response: 7F 36 NRC
-     */
     if ((len >= 3U) && (resp[0] == UDS_SID_NEGATIVE_RESPONSE))
     {
         g_clientDebug.lastRxSid = resp[0];
         g_clientDebug.lastRxNrc = resp[2];
-
         setError(UDS_OTA_CLIENT_RESULT_NEGATIVE_RESPONSE);
         return;
     }
 
-    /*
-     * Positive response 최소 길이 확인
-     * Sensor ECU는 CAN FD 64 byte로 응답하므로 len == 2가 아니라 len >= 2여야 함
-     */
     if (len < 2U)
     {
         g_dbgTdRespLenFailCount++;
@@ -1188,9 +1297,6 @@ static void handleTransferDataResponse(void)
         return;
     }
 
-    /*
-     * SID 확인: 0x36 positive response = 0x76
-     */
     if (resp[0] != positiveResponseSid(UDS_SID_TRANSFER_DATA))
     {
         g_dbgTdRespSidMismatchCount++;
@@ -1198,10 +1304,6 @@ static void handleTransferDataResponse(void)
         return;
     }
 
-    /*
-     * BSC 확인
-     * 예: currentBsc = 0x02 이면 response는 76 02 여야 함
-     */
     if (resp[1] != g_clientDebug.currentBsc)
     {
         g_dbgTdRespBscMismatchCount++;
@@ -1209,14 +1311,13 @@ static void handleTransferDataResponse(void)
         return;
     }
 
-    /*
-     * 여기까지 오면 76 xx 정상 처리 branch
-     */
     g_dbgTdRespSuccessCount++;
 
     g_clientDebug.currentBlockIndex++;
+
     g_clientDebug.sentBytes =
-        g_clientDebug.currentBlockIndex * UDS_OTA_CLIENT_TRANSFER_DATA_SIZE;
+        g_currentPayloadBaseOffset +
+        (g_clientDebug.currentBlockIndex * UDS_OTA_CLIENT_TRANSFER_DATA_SIZE);
 
     if (g_clientDebug.sentBytes > g_firmwareSize)
     {
@@ -1238,7 +1339,7 @@ static void handleTransferDataResponse(void)
     g_streamBlockLength = 0U;
     memset(g_streamBlockBuffer, 0, sizeof(g_streamBlockBuffer));
 
-    if (g_clientDebug.currentBlockIndex >= g_clientDebug.totalBlocks)
+    if (g_clientDebug.currentBlockIndex >= getCurrentSegmentBlockCount())
     {
         proceedAfterAllBlocksSent();
     }
@@ -1247,66 +1348,6 @@ static void handleTransferDataResponse(void)
         setState(UDS_OTA_CLIENT_STATE_WAIT_STREAM_BLOCK);
     }
 }
-#if 0
-static void handleTransferDataResponse(void)
-{
-    uint8_t resp[CANFD_MAX_DLC];
-    uint8_t len = 0U;
-
-    if (fetchResponse(resp, &len) == FALSE)
-    {
-        (void)checkTimeout(UDS_OTA_CLIENT_TRANSFER_TIMEOUT_TICKS);
-        return;
-    }
-
-    if ((len >= 3U) && (resp[0] == UDS_SID_NEGATIVE_RESPONSE))
-    {
-        setError(UDS_OTA_CLIENT_RESULT_NEGATIVE_RESPONSE);
-        return;
-    }
-
-    if ((len >= 2U) &&
-        (resp[0] == positiveResponseSid(UDS_SID_TRANSFER_DATA)) &&
-        (resp[1] == g_clientDebug.currentBsc))
-    {
-        g_clientDebug.currentBlockIndex++;
-        g_clientDebug.sentBytes = g_clientDebug.currentBlockIndex * UDS_OTA_CLIENT_TRANSFER_DATA_SIZE;
-
-        if (g_clientDebug.sentBytes > g_firmwareSize)
-        {
-            g_clientDebug.sentBytes = g_firmwareSize;
-        }
-
-        if (g_firmwareSize > 0U)
-        {
-            g_clientDebug.lastProgressPercent =
-                (g_clientDebug.sentBytes * 100U) / g_firmwareSize;
-        }
-
-        g_clientDebug.currentBsc++;
-
-        /*
-         * uint8 overflow로 0xFF 다음 0x00 자연 wrap.
-         */
-        g_streamBlockReady = FALSE;
-        g_streamBlockLength = 0U;
-        memset(g_streamBlockBuffer, 0, sizeof(g_streamBlockBuffer));
-
-        if (g_clientDebug.currentBlockIndex >= g_clientDebug.totalBlocks)
-        {
-            proceedAfterAllBlocksSent();
-        }
-        else
-        {
-            setState(UDS_OTA_CLIENT_STATE_WAIT_STREAM_BLOCK);
-        }
-    }
-    else
-    {
-        setError(UDS_OTA_CLIENT_RESULT_UNEXPECTED_RESPONSE);
-    }
-}
-#endif
 
 static void sendRequestTransferExit(void)
 {
@@ -1320,11 +1361,11 @@ static void sendRequestTransferExit(void)
 
     if (sendPayload(p, UDS_REQ_LEN_REQUEST_TRANSFER_EXIT) == TRUE)
     {
-        g_clientDebug.lastExpectedSid = positiveResponseSid(UDS_SID_REQUEST_TRANSFER_EXIT);
+        g_clientDebug.lastExpectedSid =
+            positiveResponseSid(UDS_SID_REQUEST_TRANSFER_EXIT);
         setState(UDS_OTA_CLIENT_STATE_WAIT_REQUEST_TRANSFER_EXIT);
     }
 }
-
 
 static void handleRequestTransferExitResponse(void)
 {
@@ -1343,16 +1384,42 @@ static void handleRequestTransferExitResponse(void)
         return;
     }
 
-    if ((len >= 1U) && (resp[0] == positiveResponseSid(UDS_SID_REQUEST_TRANSFER_EXIT)))
+    if ((len >= 1U) &&
+        (resp[0] == positiveResponseSid(UDS_SID_REQUEST_TRANSFER_EXIT)))
     {
-        setState(UDS_OTA_CLIENT_STATE_SEND_ROUTINE_CONTROL_CRC);
+        /*
+         * Sparse mode:
+         * segment0의 0x37 응답 이후에는 바로 CRC로 가지 않고,
+         * 다음 segment의 0x34 RequestDownload로 이동한다.
+         */
+        if (g_sparseMode == TRUE)
+        {
+            if ((uint32_t)(g_currentSegmentIndex + 1U) <
+                (uint32_t)g_sparseManifest.segmentCount)
+            {
+                moveToNextSegment();
+                setState(UDS_OTA_CLIENT_STATE_SEND_REQUEST_DOWNLOAD);
+                return;
+            }
+        }
+
+        /*
+         * 모든 segment 전송이 끝난 뒤에만 CRC 단계로 간다.
+         */
+        if (g_finalCrcProvided == TRUE)
+        {
+            setState(UDS_OTA_CLIENT_STATE_SEND_ROUTINE_CONTROL_CRC);
+        }
+        else
+        {
+            setState(UDS_OTA_CLIENT_STATE_WAIT_FINAL_CRC);
+        }
     }
     else
     {
         setError(UDS_OTA_CLIENT_RESULT_UNEXPECTED_RESPONSE);
     }
 }
-
 
 static void sendRoutineControlCrc(void)
 {
@@ -1376,11 +1443,11 @@ static void sendRoutineControlCrc(void)
 
     if (sendPayload(p, UDS_REQ_LEN_ROUTINE_CONTROL_CHECK_CRC32) == TRUE)
     {
-        g_clientDebug.lastExpectedSid = positiveResponseSid(UDS_SID_ROUTINE_CONTROL);
+        g_clientDebug.lastExpectedSid =
+            positiveResponseSid(UDS_SID_ROUTINE_CONTROL);
         setState(UDS_OTA_CLIENT_STATE_WAIT_ROUTINE_CONTROL_CRC);
     }
 }
-
 
 static void handleRoutineControlCrcResponse(void)
 {
@@ -1401,7 +1468,8 @@ static void handleRoutineControlCrcResponse(void)
         return;
     }
 
-    if ((len >= 8U) && (resp[0] == positiveResponseSid(UDS_SID_ROUTINE_CONTROL)))
+    if ((len >= 8U) &&
+        (resp[0] == positiveResponseSid(UDS_SID_ROUTINE_CONTROL)))
     {
         routineId = readU16Le(&resp[2]);
         calculatedCrc32 = readU32Le(&resp[4]);
@@ -1421,13 +1489,6 @@ static void handleRoutineControlCrcResponse(void)
             return;
         }
 
-        /*
-         * CRC 검증 성공.
-         *
-         * 현재 Dual Slot / Bank B OTA:
-         *   Download Phase는 여기서 종료한다.
-         *   실제 Bank B 활성화/UCB_SWAP은 사용자 승인 후 별도 요청으로 수행한다.
-         */
         g_clientDebug.lastResult = UDS_OTA_CLIENT_RESULT_OK;
         g_clientDebug.lastProgressPercent = 100U;
 
@@ -1443,7 +1504,6 @@ static void handleRoutineControlCrcResponse(void)
     }
 }
 
-
 static void sendEcuReset(void)
 {
     uint8_t p[CANFD_MAX_DLC];
@@ -1457,11 +1517,11 @@ static void sendEcuReset(void)
 
     if (sendPayload(p, UDS_REQ_LEN_ECU_RESET) == TRUE)
     {
-        g_clientDebug.lastExpectedSid = positiveResponseSid(UDS_SID_ECU_RESET);
+        g_clientDebug.lastExpectedSid =
+            positiveResponseSid(UDS_SID_ECU_RESET);
         setState(UDS_OTA_CLIENT_STATE_WAIT_ECU_RESET);
     }
 }
-
 
 static void handleEcuResetResponse(void)
 {
