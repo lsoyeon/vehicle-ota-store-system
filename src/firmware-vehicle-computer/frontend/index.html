@@ -987,6 +987,9 @@ function showBootResult(r) {
     const verDisplay = fmtVerObj(res.version) || (res.version ? `v${res.version}` : '-');
     list.innerHTML+=`<div class="otarow"><span class="otarow-icon">${m.icon}</span><div class="otarow-info"><div class="otarow-name">${res.feature_name}${res.ecu_target ? ` (${res.ecu_target})` : ''}</div><div class="otarow-detail">${res.success?`${verDisplay} 완료`:'실패'}</div></div><span class="obadge ${res.success?'bok':'bfail'}">${res.success?'✓':'✗'}</span></div>`;
   });
+  ((r.reset_trigger||{}).triggers||[]).forEach(trigger=>{
+    list.innerHTML+=`<div class="otarow"><span class="otarow-icon">↻</span><div class="otarow-info"><div class="otarow-name">${trigger.event_name || 'OTA reset trigger'}</div><div class="otarow-detail">${trigger.service_id || '-'} / ${trigger.event_id || '-'} → ${trigger.host || '-'}:${trigger.port || '-'}</div></div><span class="obadge ${trigger.success?'bok':'bfail'}">${trigger.success?'✓':'✗'}</span></div>`;
+  });
   showOv('ov-boot-result');
 }
 

@@ -57,12 +57,21 @@ DEFAULT_GET_SENSOR_ECU_VERSION_METHOD_ID = 0x1001
 DEFAULT_GET_DRIVE_ECU_VERSION_METHOD_ID = 0x1002
 DEFAULT_GET_FRONT_ECU_VERSION_METHOD_ID = 0x1003
 DEFAULT_GET_AEB_VERSION_METHOD_ID = 0x1004
+DEFAULT_OTA_RESET_SERVICE_ID = 0x0008
+DEFAULT_OTA_FRONT_ZCU_TRIGGER_EVENT_ID = 0x2001
+DEFAULT_OTA_DRIVE_ECU_TRIGGER_EVENT_ID = 0x2002
+DEFAULT_OTA_SENSOR_ECU_TRIGGER_EVENT_ID = 0x2003
 
 VEHICLE_TX_ENABLED = os.getenv("VEHICLE_TX_ENABLED", "1") != "0"
 VEHICLE_TX_PROTOCOL = os.getenv("VEHICLE_TX_PROTOCOL", "udp").lower()
 VEHICLE_TX_HOST = os.getenv("VEHICLE_TX_HOST", DEFAULT_VEHICLE_TX_HOST)
 VEHICLE_TX_PORT = int(os.getenv("VEHICLE_TX_PORT", str(DEFAULT_VEHICLE_TX_PORT)))
 VEHICLE_TX_TIMEOUT_SECONDS = float(os.getenv("VEHICLE_TX_TIMEOUT_SECONDS", "0.05"))
+OTA_RESET_TRIGGER_ENABLED = os.getenv("VEHICLE_OTA_RESET_TRIGGER_ENABLED", "1") != "0"
+OTA_RESET_TRIGGER_PROTOCOL = os.getenv("VEHICLE_OTA_RESET_TRIGGER_PROTOCOL", "udp").lower()
+OTA_RESET_TRIGGER_HOST = os.getenv("VEHICLE_OTA_RESET_TRIGGER_HOST", VEHICLE_TX_HOST)
+OTA_RESET_TRIGGER_PORT = int(os.getenv("VEHICLE_OTA_RESET_TRIGGER_PORT", str(VEHICLE_TX_PORT)))
+OTA_RESET_TRIGGER_TIMEOUT_SECONDS = float(os.getenv("VEHICLE_OTA_RESET_TRIGGER_TIMEOUT_SECONDS", "0.1"))
 VEHICLE_LINK_PING_ENABLED = os.getenv("VEHICLE_LINK_PING_ENABLED", "1") != "0"
 VEHICLE_LINK_PING_HOST = os.getenv("VEHICLE_LINK_PING_HOST", VEHICLE_TX_HOST)
 VEHICLE_LINK_PING_TIMEOUT_SECONDS = float(os.getenv("VEHICLE_LINK_PING_TIMEOUT_SECONDS", "0.75"))
@@ -98,6 +107,17 @@ FEATURE_VERSION_TARGET = "Feature"
 DRIVE_SERVICE_ID = DEFAULT_DRIVE_SERVICE_ID
 DRIVE_METHOD_ID = DEFAULT_DRIVE_METHOD_ID
 DRIVE_CLIENT_ID = DEFAULT_DRIVE_CLIENT_ID
+OTA_RESET_TRIGGER_CLIENT_ID = int(os.getenv("OTA_RESET_TRIGGER_CLIENT_ID", str(DRIVE_CLIENT_ID)), 0)
+OTA_RESET_SERVICE_ID = int(os.getenv("OTA_RESET_SERVICE_ID", str(DEFAULT_OTA_RESET_SERVICE_ID)), 0)
+OTA_FRONT_ZCU_TRIGGER_EVENT_ID = int(
+    os.getenv("OTA_FRONT_ZCU_TRIGGER_EVENT_ID", str(DEFAULT_OTA_FRONT_ZCU_TRIGGER_EVENT_ID)), 0
+)
+OTA_DRIVE_ECU_TRIGGER_EVENT_ID = int(
+    os.getenv("OTA_DRIVE_ECU_TRIGGER_EVENT_ID", str(DEFAULT_OTA_DRIVE_ECU_TRIGGER_EVENT_ID)), 0
+)
+OTA_SENSOR_ECU_TRIGGER_EVENT_ID = int(
+    os.getenv("OTA_SENSOR_ECU_TRIGGER_EVENT_ID", str(DEFAULT_OTA_SENSOR_ECU_TRIGGER_EVENT_ID)), 0
+)
 SENSOR_SERVICE_ID = int(os.getenv("SENSOR_SERVICE_ID", str(DEFAULT_SENSOR_SERVICE_ID)), 0)
 TOF_VALUE_UPDATED_EVENT_ID = int(
     os.getenv("TOF_VALUE_UPDATED_EVENT_ID", str(DEFAULT_TOF_VALUE_UPDATED_EVENT_ID)), 0
@@ -198,18 +218,11 @@ STORE_CATALOG = [
         "kind": "feature",
         "latest_version": "1.0.0",
         "downloadable": True,
+        "package_required": False,
         "download_file": "AEB.py",
         "runtime_class": "AEBFeature",
         "release_repo": "HAMES-6th-Overdrive/firmware-front-zcu",
         "ota_actions": [
-            {
-                "id": "python_package",
-                "type": "github_release_file",
-                "target": "rpi",
-                "release_repo": "HAMES-6th-Overdrive/firmware-front-zcu",
-                "download_file": "AEB.py",
-                "target_dir": "features",
-            },
             {
                 "id": "zcu_firmware",
                 "type": "doip_uds_flash",
@@ -223,6 +236,24 @@ STORE_CATALOG = [
                 "bank_start": 0x80300000,
                 "timeout_seconds": 60,
                 "release_patch_filter": 1,
+            },
+            {
+                "id": "sensor_ecu_firmware",
+                "type": "doip_sensor_can_ota",
+                "target": "sensor-ecu",
+                "release_repo": os.getenv("AEB_SENSOR_ECU_OTA_REPO", "HAMES-6th-Overdrive/firmware-front-zcu"),
+                "target_dir": "firmware",
+                "asset_name": os.getenv("AEB_SENSOR_ECU_OTA_ASSET", "sensor_ecu__slow_toggle.bin"),
+                "ecu_ip": os.getenv("AEB_SENSOR_ECU_OTA_ZCU_IP", "192.168.10.2"),
+                "doip_port": int(os.getenv("AEB_SENSOR_ECU_OTA_DOIP_PORT", "13401")),
+                "tester_address": int(os.getenv("AEB_SENSOR_ECU_OTA_TESTER_ADDRESS", "0x0E00"), 0),
+                "ecu_address": int(os.getenv("AEB_SENSOR_ECU_OTA_ZCU_ADDRESS", "0x0001"), 0),
+                "app_addr": int(os.getenv("AEB_SENSOR_ECU_OTA_APP_ADDR", "0x80020000"), 0),
+                "block_size": int(os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_SIZE", "32")),
+                "timeout_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_TIMEOUT_SECONDS", "60")),
+                "block_delay_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS", "0.005")),
+                "activate_after_transfer": False,
+                "release_patch_filter": int(os.getenv("AEB_SENSOR_ECU_OTA_RELEASE_PATCH_FILTER", "1")),
             },
         ],
     },
@@ -527,9 +558,10 @@ class FeatureStateStore:
 
     def _default_record(self, feature_id: str) -> dict:
         item = self._catalog_item(feature_id)
-        download_file = item.get("download_file")
+        package_required = bool(item.get("package_required", True))
+        download_file = item.get("download_file") if package_required else None
         package_action = None
-        if item.get("downloadable"):
+        if item.get("downloadable") and package_required:
             try:
                 package_action = self.ota_manager.python_package_action(item)
             except ValueError:
@@ -550,6 +582,7 @@ class FeatureStateStore:
                 "source": (
                     "github-release" if package_action and package_action.get("type") == "github_release_file"
                     else "local-file" if package_action and package_action.get("type") == "local_file"
+                    else "firmware-only" if item.get("downloadable") and not package_required
                     else None
                 ),
                 "action_id": package_action.get("id") if package_action else None,
@@ -700,7 +733,7 @@ class FeatureStateStore:
                     }
                 )
 
-            if catalog_item.get("downloadable"):
+            if catalog_item.get("downloadable") and catalog_item.get("package_required", True):
                 download_path = self.ota_manager.downloaded_features_dir / str(catalog_item["download_file"])
                 record["package"]["downloaded"] = download_path.exists()
                 record["package"]["path"] = (
@@ -757,7 +790,7 @@ class FeatureStateStore:
         return [
             action
             for action in self.ota_manager.actions_for(item)
-            if action.get("type") == "doip_uds_flash"
+            if action.get("type") in ("doip_uds_flash", "doip_sensor_can_ota")
         ]
 
     def _is_record_installed(self, item: dict, record: dict) -> bool:
@@ -765,7 +798,8 @@ class FeatureStateStore:
             return bool(record["purchased"])
         if not item.get("downloadable"):
             return bool(record["purchased"])
-        if not (record["package"].get("downloaded") and record["package"].get("applied")):
+        package_required = bool(item.get("package_required", True))
+        if package_required and not (record["package"].get("downloaded") and record["package"].get("applied")):
             return False
         if self._zcu_actions(item):
             return bool(record["zcu_ota"].get("applied"))
@@ -868,8 +902,9 @@ class FeatureStateStore:
                 )
 
             if item.get("downloadable"):
-                self._download_feature_unlocked(data, feature_id, force=True, run_flash=False)
+                self._download_feature_unlocked(data, feature_id, force=True, run_flash=True)
                 self._queue_initial_install_unlocked(data, item, data["items"][feature_id])
+                self._queue_reset_trigger_unlocked(data, item, data["items"][feature_id])
 
             data["purchased"] = [
                 item_id for item_id, item_record in data["items"].items() if item_record["purchased"]
@@ -891,8 +926,9 @@ class FeatureStateStore:
             if not data["items"][feature_id]["purchased"]:
                 raise ValueError(f"store item is not purchased: {feature_id}")
             item = self._catalog_item(feature_id)
-            self._download_feature_unlocked(data, feature_id, force=True, run_flash=False)
+            self._download_feature_unlocked(data, feature_id, force=True, run_flash=True)
             self._queue_initial_install_unlocked(data, item, data["items"][feature_id])
+            self._queue_reset_trigger_unlocked(data, item, data["items"][feature_id])
             self._save_unlocked(data)
             return {"success": True, "item": data["items"][feature_id]}
 
@@ -944,9 +980,12 @@ class FeatureStateStore:
                     and pending_item.get("install_required")
                     and pending_item.get("feature_id") in data["items"]
                     and data["items"][pending_item["feature_id"]].get("purchased")
-                    and not self._is_record_installed(
-                        self._catalog_item(pending_item["feature_id"]),
-                        data["items"][pending_item["feature_id"]],
+                    and (
+                        bool(pending_item.get("reset_required"))
+                        or not self._is_record_installed(
+                            self._catalog_item(pending_item["feature_id"]),
+                            data["items"][pending_item["feature_id"]],
+                        )
                     )
                 ],
                 "to_update": [],
@@ -1046,6 +1085,27 @@ class FeatureStateStore:
             self._save_unlocked(data)
             return next_pending
 
+    def _queue_reset_trigger_unlocked(self, data: dict, item: dict, record: dict) -> None:
+        actions = self._zcu_actions(item)
+        if not actions or not record["zcu_ota"].get("applied"):
+            return
+        pending = data.setdefault("pending_ota", {"to_install": [], "to_update": [], "checked_at": None})
+        for action in actions:
+            pending_item = self._pending_item(
+                item,
+                action,
+                record,
+                ota_kind="initial_install",
+                update_scope="install",
+                current_version=firmware_version(record["zcu_ota"].get("version")),
+                latest_version=record.get("version") or item.get("latest_version"),
+                latest_versions={"ZCU": firmware_version(record["zcu_ota"].get("version")) or record.get("version")},
+            )
+            pending_item["reset_required"] = True
+            pending_item["full_name"] = f"{item.get('name', item['id'])} ECU reset trigger"
+            self._upsert_pending_unlocked(pending, "to_install", pending_item)
+        pending["checked_at"] = utc_now()
+
     def pending_ota(self) -> dict:
         return self.load().get("pending_ota", {"to_install": [], "to_update": [], "checked_at": None})
 
@@ -1080,7 +1140,9 @@ class FeatureStateStore:
                     continue
 
                 try:
-                    self._download_feature_unlocked(data, feature_id, force=True)
+                    reset_only = bool(pending_item.get("reset_required")) and self._is_record_installed(item, record)
+                    if not reset_only:
+                        self._download_feature_unlocked(data, feature_id, force=True)
                     record = data["items"][feature_id]
                     zcu = record["zcu_ota"]
                     success = (
@@ -1143,48 +1205,83 @@ class FeatureStateStore:
             return False
 
         record = data["items"][feature_id]
-        result = self.ota_manager.download_feature_package(
-            item,
-            current_version=record.get("version"),
-            force=force,
-        )
+        zcu_actions = self._zcu_actions(item)
+        combined_progress = bool(run_flash and force and zcu_actions)
+        package_required = bool(item.get("package_required", True))
+        package_progress_end = 25 if package_required else 0
         package = record["package"]
-        package["downloaded"] = result.downloaded
-        if result.updated or not result.downloaded:
-            package["applied"] = result.applied
-        package["path"] = (
-            str(result.path.relative_to(self.ota_manager.base_dir))
-            if result.path is not None and result.path.is_relative_to(self.ota_manager.base_dir)
-            else str(result.path) if result.path is not None else None
-        )
-        package["source"] = "github-release" if result.release_url else "local-file"
-        package["action_id"] = result.action_id
-        package["action_type"] = result.action_type
-        package["target"] = result.target
-        package_action = self.ota_manager.python_package_action(item)
-        package["repo"] = (
-            package_action.get("release_repo") or item.get("release_repo")
-            if result.release_url
-            else None
-        )
-        package["release_tag"] = result.release_tag
-        package["release_url"] = result.release_url
-        package["asset_name"] = result.asset_name or package.get("asset_name")
-        package["checked_at"] = result.checked_at
-        if result.version:
-            record["version"] = result.version
-        module_version = python_module_version(result.path)
-        if module_version:
-            record["version"] = module_version
-        if result.downloaded_at:
-            package["downloaded_at"] = result.downloaded_at
-        if result.updated:
-            package["applied_at"] = None
-        package["error"] = result.error
-        updated = result.updated
 
-        for action in self.ota_manager.actions_for(item):
-            if action.get("type") != "doip_uds_flash":
+        if package_required:
+            package_action = dict(self.ota_manager.python_package_action(item))
+            if combined_progress:
+                package_action["progress_start"] = 0
+                package_action["progress_end"] = package_progress_end
+            result = self.ota_manager.run_action(
+                item,
+                package_action,
+                current_version=record.get("version"),
+                force=force,
+            )
+            package["downloaded"] = result.downloaded
+            if result.updated or not result.downloaded:
+                package["applied"] = result.applied
+            package["path"] = (
+                str(result.path.relative_to(self.ota_manager.base_dir))
+                if result.path is not None and result.path.is_relative_to(self.ota_manager.base_dir)
+                else str(result.path) if result.path is not None else None
+            )
+            package["source"] = "github-release" if result.release_url else "local-file"
+            package["action_id"] = result.action_id
+            package["action_type"] = result.action_type
+            package["target"] = result.target
+            package["repo"] = (
+                package_action.get("release_repo") or item.get("release_repo")
+                if result.release_url
+                else None
+            )
+            package["release_tag"] = result.release_tag
+            package["release_url"] = result.release_url
+            package["asset_name"] = result.asset_name or package.get("asset_name")
+            package["checked_at"] = result.checked_at
+            if result.version:
+                record["version"] = result.version
+            module_version = python_module_version(result.path)
+            if module_version:
+                record["version"] = module_version
+            if result.downloaded_at:
+                package["downloaded_at"] = result.downloaded_at
+            if result.updated:
+                package["applied_at"] = None
+            package["error"] = result.error
+            updated = result.updated
+        else:
+            package["downloaded"] = True
+            package["applied"] = True
+            package["path"] = None
+            package["source"] = "firmware-only"
+            package["action_id"] = None
+            package["action_type"] = "firmware_only"
+            package["target"] = "firmware"
+            package["repo"] = item.get("release_repo")
+            package["release_tag"] = None
+            package["release_url"] = None
+            package["asset_name"] = None
+            package["checked_at"] = utc_now()
+            package["downloaded_at"] = package["downloaded_at"] or package["checked_at"]
+            package["applied_at"] = package["applied_at"] or package["checked_at"]
+            package["error"] = None
+            updated = False
+        firmware_failed = False
+
+        firmware_count = max(1, len(zcu_actions))
+        for index, action in enumerate(zcu_actions):
+            action = dict(action)
+            if combined_progress:
+                span_start = package_progress_end + int(index * (100 - package_progress_end) / firmware_count)
+                span_end = package_progress_end + int((index + 1) * (100 - package_progress_end) / firmware_count)
+                action["progress_start"] = span_start
+                action["progress_end"] = span_end
+            if action.get("type") not in ("doip_uds_flash", "doip_sensor_can_ota"):
                 continue
             if not force or not run_flash:
                 continue
@@ -1199,6 +1296,7 @@ class FeatureStateStore:
             except Exception as exc:
                 zcu["checked_at"] = utc_now()
                 zcu["error"] = f"{type(exc).__name__}: {exc}"
+                firmware_failed = True
                 continue
 
             zcu["required"] = True
@@ -1225,6 +1323,9 @@ class FeatureStateStore:
                 zcu["applied_at"] = utc_now() if zcu_result.applied else None
             zcu["error"] = zcu_result.error
             updated = updated or zcu_result.updated
+
+        if firmware_failed:
+            record["zcu_ota"]["applied"] = False
 
         return updated
 
@@ -2072,6 +2173,137 @@ def api_server_worker(
             if feature_id in ("AEB", "LKAS", "FVSA"):
                 vehicle_control.poll_once()
 
+        ota_reset_session_lock = threading.Lock()
+        ota_reset_session_id = 0
+        ota_reset_event_map = {
+            "front-zcu": {
+                "event_id": OTA_FRONT_ZCU_TRIGGER_EVENT_ID,
+                "event_name": "OtaFrontZcuTriggerd",
+            },
+            "drive-ecu": {
+                "event_id": OTA_DRIVE_ECU_TRIGGER_EVENT_ID,
+                "event_name": "OtaDriveEcuTriggerd",
+            },
+            "sensor-ecu": {
+                "event_id": OTA_SENSOR_ECU_TRIGGER_EVENT_ID,
+                "event_name": "OtaSensorEcuTriggerd",
+            },
+        }
+        ota_reset_target_aliases = {
+            "zcu": "front-zcu",
+            "front": "front-zcu",
+            "frontzcu": "front-zcu",
+            "front-zcu": "front-zcu",
+            "drive": "drive-ecu",
+            "driveecu": "drive-ecu",
+            "drive-ecu": "drive-ecu",
+            "motor": "drive-ecu",
+            "motorecu": "drive-ecu",
+            "motor-ecu": "drive-ecu",
+            "sensor": "sensor-ecu",
+            "sensorecu": "sensor-ecu",
+            "sensor-ecu": "sensor-ecu",
+        }
+
+        def next_ota_reset_session_id() -> int:
+            nonlocal ota_reset_session_id
+            with ota_reset_session_lock:
+                ota_reset_session_id = (ota_reset_session_id + 1) & 0xFFFF
+                return ota_reset_session_id or 1
+
+        def normalize_ota_reset_target(value: Any) -> str | None:
+            if value is None:
+                return None
+            key = str(value).strip().lower().replace("_", "-").replace(" ", "")
+            return ota_reset_target_aliases.get(key)
+
+        def ota_reset_targets_from_pending(pending: dict, apply_result: dict) -> list[str]:
+            apply_results = [result for result in apply_result.get("results", []) if isinstance(result, dict)]
+            successful_features = {
+                str(result.get("feature_id"))
+                for result in apply_results
+                if result.get("success")
+            }
+            targets: list[str] = []
+            for bucket in ("to_install", "to_update"):
+                for pending_item in pending.get(bucket, []):
+                    if not isinstance(pending_item, dict):
+                        continue
+                    if apply_results and str(pending_item.get("feature_id")) not in successful_features:
+                        continue
+                    if pending_item.get("update_scope") == "feature":
+                        continue
+
+                    raw_targets = pending_item.get("targets")
+                    values = list(raw_targets) if isinstance(raw_targets, list) else []
+                    values.extend([pending_item.get("ecu_target"), pending_item.get("target")])
+                    for value in values:
+                        target = normalize_ota_reset_target(value)
+                        if target and target not in targets:
+                            targets.append(target)
+            return targets
+
+        def send_ota_reset_triggers(pending: dict, apply_result: dict) -> dict:
+            targets = ota_reset_targets_from_pending(pending, apply_result)
+            if not targets:
+                return {"success": True, "enabled": OTA_RESET_TRIGGER_ENABLED, "triggers": []}
+
+            triggers = []
+            for target in targets:
+                event = ota_reset_event_map[target]
+                payload = {
+                    "target": target,
+                    "service_id": f"0x{OTA_RESET_SERVICE_ID:04X}",
+                    "event_id": f"0x{event['event_id']:04X}",
+                    "event_name": event["event_name"],
+                    "host": OTA_RESET_TRIGGER_HOST,
+                    "port": OTA_RESET_TRIGGER_PORT,
+                    "success": False,
+                }
+
+                if not OTA_RESET_TRIGGER_ENABLED:
+                    payload.update({"success": True, "skipped": True, "message": "OTA reset trigger is disabled"})
+                    triggers.append(payload)
+                    continue
+
+                try:
+                    packet = build_someip_packet(
+                        b"",
+                        service_id=OTA_RESET_SERVICE_ID,
+                        method_id=event["event_id"],
+                        client_id=OTA_RESET_TRIGGER_CLIENT_ID,
+                        session_id=next_ota_reset_session_id(),
+                        message_type=0x02,
+                    )
+                    response = send_ethernet_message(
+                        OTA_RESET_TRIGGER_PROTOCOL,
+                        OTA_RESET_TRIGGER_HOST,
+                        OTA_RESET_TRIGGER_PORT,
+                        packet,
+                        timeout_seconds=OTA_RESET_TRIGGER_TIMEOUT_SECONDS,
+                        expect_response=False,
+                    )
+                    payload.update({"success": True, "bytes_sent": response.bytes_sent})
+                    logger.info(
+                        "OTA reset trigger sent: %s service=0x%04x event=0x%04x target=%s:%s",
+                        event["event_name"],
+                        OTA_RESET_SERVICE_ID,
+                        event["event_id"],
+                        OTA_RESET_TRIGGER_HOST,
+                        OTA_RESET_TRIGGER_PORT,
+                    )
+                except Exception as exc:
+                    payload.update({"success": False, "error": f"{type(exc).__name__}: {exc}"})
+                    logger.warning("OTA reset trigger failed for %s: %s", target, exc)
+
+                triggers.append(payload)
+
+            return {
+                "success": all(trigger.get("success") for trigger in triggers),
+                "enabled": OTA_RESET_TRIGGER_ENABLED,
+                "triggers": triggers,
+            }
+
         def vehicle_computer_connection_payload() -> dict[str, Any]:
             event_status = vehicle_status.vehicle_event_snapshot(VEHICLE_COMM_STALE_SECONDS)
             firmware_status = firmware_versions.communication_snapshot(VEHICLE_COMM_STALE_SECONDS)
@@ -2138,12 +2370,19 @@ def api_server_worker(
         store_latest_version_cache_seconds = float(os.getenv("VEHICLE_STORE_VERSION_CACHE_SECONDS", "60"))
 
         def github_latest_feature_version(item: dict) -> dict:
-            try:
-                action = ota_manager.python_package_action(item)
-            except ValueError:
-                action = None
+            action = None
+            if item.get("package_required", True):
+                try:
+                    action = ota_manager.python_package_action(item)
+                except ValueError:
+                    action = None
+            if action is None:
+                for candidate in ota_manager.actions_for(item):
+                    if candidate.get("release_repo"):
+                        action = candidate
+                        break
 
-            if not action or action.get("type") != "github_release_file":
+            if not action or not action.get("release_repo"):
                 latest_version = firmware_version(item.get("latest_version")) or str(item.get("latest_version") or "")
                 return {
                     "latest_version": latest_version,
@@ -2619,7 +2858,12 @@ def api_server_worker(
                     "pending_ota": feature_state_store.pending_ota(),
                 }
 
+            pending_before = feature_state_store.pending_ota()
             result = await run_in_threadpool(feature_state_store.apply_pending_ota)
+            reset_trigger = await run_in_threadpool(send_ota_reset_triggers, pending_before, result)
+            result["reset_trigger"] = reset_trigger
+            if not reset_trigger.get("success", True):
+                result["all_success"] = False
             vehicle_control.poll_once()
             return {
                 "success": True,

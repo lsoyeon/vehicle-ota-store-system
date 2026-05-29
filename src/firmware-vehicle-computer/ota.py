@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import socket
+import struct
 import threading
 import time
 import urllib.error
@@ -67,6 +69,7 @@ class GithubReleaseFileAction(OtaAction):
         action_id = str(action.get("id", "python_package"))
         target_name = str(action.get("target", "rpi"))
         checked_at = utc_now()
+        percent_start, percent_end = action_progress_span(action)
         download_file = str(action.get("download_file") or catalog_item["download_file"])
         target = manager.resolve_target_path(action, download_file)
         manager.update_progress(
@@ -76,7 +79,7 @@ class GithubReleaseFileAction(OtaAction):
             target=target_name,
             phase="checking",
             status="checking",
-            percent=0,
+            percent=percent_start,
             message="최신 릴리즈 확인 중",
             active=True,
         )
@@ -94,7 +97,7 @@ class GithubReleaseFileAction(OtaAction):
                 target=target_name,
                 phase="complete",
                 status="current",
-                percent=100,
+                percent=percent_end,
                 message="최신 버전입니다",
                 active=False,
             )
@@ -122,7 +125,7 @@ class GithubReleaseFileAction(OtaAction):
             target=target_name,
             phase="download",
             status="downloading",
-            percent=0,
+            percent=percent_start,
             message=f"{download_file} 다운로드 중",
             active=True,
         )
@@ -135,6 +138,8 @@ class GithubReleaseFileAction(OtaAction):
                 "action_type": self.action_type,
                 "target": target_name,
                 "message": f"{download_file} 다운로드 중",
+                "percent_start": percent_start,
+                "percent_end": percent_end,
             },
         )
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -148,7 +153,7 @@ class GithubReleaseFileAction(OtaAction):
             target=target_name,
             phase="complete",
             status="complete",
-            percent=100,
+            percent=percent_end,
             message=f"{download_file} 다운로드 완료",
             active=False,
             bytes_downloaded=len(module_bytes),
@@ -188,6 +193,7 @@ class LocalFileAction(OtaAction):
         action_id = str(action.get("id", "local_file"))
         target_name = str(action.get("target", "rpi"))
         checked_at = utc_now()
+        percent_start, percent_end = action_progress_span(action)
         source = manager.resolve_source_path(action)
         download_file = str(action.get("download_file") or source.name)
         target = manager.resolve_target_path(action, download_file)
@@ -200,7 +206,7 @@ class LocalFileAction(OtaAction):
             target=target_name,
             phase="download",
             status="copying",
-            percent=0,
+            percent=percent_start,
             message=f"{download_file} 설치 중",
             active=True,
         )
@@ -215,7 +221,7 @@ class LocalFileAction(OtaAction):
                 target=target_name,
                 phase="complete",
                 status="current",
-                percent=100,
+                percent=percent_end,
                 message="최신 버전입니다",
                 active=False,
             )
@@ -245,7 +251,7 @@ class LocalFileAction(OtaAction):
             target=target_name,
             phase="complete",
             status="complete",
-            percent=100,
+            percent=percent_end,
             message=f"{download_file} 설치 완료",
             active=False,
             bytes_downloaded=target.stat().st_size,
@@ -285,6 +291,8 @@ class DoipUdsFlashAction(OtaAction):
         action_id = str(action.get("id", "zcu_flash"))
         target_name = str(action.get("target", "zcu"))
         checked_at = utc_now()
+        percent_start, percent_end = action_progress_span(action)
+        percent_flash_start = percent_start + int((percent_end - percent_start) * 0.4)
         manager.update_progress(
             feature_id,
             action_id=action_id,
@@ -292,7 +300,7 @@ class DoipUdsFlashAction(OtaAction):
             target=target_name,
             phase="checking",
             status="checking",
-            percent=0,
+            percent=percent_start,
             message="ZCU 펌웨어 릴리즈 확인 중",
             active=True,
         )
@@ -315,7 +323,7 @@ class DoipUdsFlashAction(OtaAction):
                 target=target_name,
                 phase="complete",
                 status="current",
-                percent=100,
+                percent=percent_end,
                 message="ZCU 펌웨어가 최신 버전입니다",
                 active=False,
             )
@@ -343,7 +351,7 @@ class DoipUdsFlashAction(OtaAction):
             target=target_name,
             phase="download",
             status="downloading",
-            percent=0,
+            percent=percent_start,
             message="ZCU 펌웨어 다운로드 중",
             active=True,
         )
@@ -356,8 +364,8 @@ class DoipUdsFlashAction(OtaAction):
                 "action_type": self.action_type,
                 "target": target_name,
                 "message": "ZCU 펌웨어 다운로드 중",
-                "percent_start": 0,
-                "percent_end": 50,
+                "percent_start": percent_start,
+                "percent_end": percent_flash_start,
             },
         )
         bin_path.parent.mkdir(parents=True, exist_ok=True)
@@ -372,7 +380,7 @@ class DoipUdsFlashAction(OtaAction):
             target=target_name,
             phase="install",
             status="flashing",
-            percent=50,
+            percent=percent_flash_start,
             message="ZCU 펌웨어 플래싱 중",
             active=True,
             bytes_downloaded=len(firmware_bytes),
@@ -388,8 +396,8 @@ class DoipUdsFlashAction(OtaAction):
                 "action_type": self.action_type,
                 "target": target_name,
                 "message": "ZCU 펌웨어 플래싱 중",
-                "percent_start": 50,
-                "percent_end": 100,
+                "percent_start": percent_flash_start,
+                "percent_end": percent_end,
             },
         )
         manager.update_progress(
@@ -399,7 +407,7 @@ class DoipUdsFlashAction(OtaAction):
             target=target_name,
             phase="complete" if success else "error",
             status="complete" if success else "failed",
-            percent=100 if success else None,
+            percent=percent_end if success else None,
             message="ZCU 펌웨어 플래싱 완료" if success else "ZCU 펌웨어 플래싱 실패",
             active=False,
             bytes_downloaded=len(firmware_bytes),
@@ -422,6 +430,173 @@ class DoipUdsFlashAction(OtaAction):
             checked_at=checked_at,
             error=None if success else "DoIP/UDS flashing failed",
         )
+
+
+class DoipSensorCanOtaAction(OtaAction):
+    action_type = "doip_sensor_can_ota"
+
+    def run(
+        self,
+        manager: "OtaManager",
+        catalog_item: dict[str, Any],
+        action: dict[str, Any],
+        *,
+        current_version: str | None,
+        force: bool,
+    ) -> OtaPackageResult:
+        feature_id = str(catalog_item["id"])
+        action_id = str(action.get("id", "sensor_ecu_ota"))
+        target_name = str(action.get("target", "sensor-ecu"))
+        checked_at = utc_now()
+        percent_start, percent_end = action_progress_span(action)
+        percent_transfer_start = percent_start + int((percent_end - percent_start) * 0.25)
+        manager.update_progress(
+            feature_id,
+            action_id=action_id,
+            action_type=self.action_type,
+            target=target_name,
+            phase="checking",
+            status="checking",
+            percent=percent_start,
+            message="Sensor ECU OTA 릴리즈 확인 중",
+            active=True,
+        )
+
+        release = manager.fetch_latest_release(catalog_item, action)
+        release_tag = str(release.get("tag_name") or "")
+        version = clean_firmware_version(release_tag) or str(catalog_item.get("latest_version", "1.0.0"))
+        release_url = release.get("html_url")
+        download_file = manager.release_bin_asset_name(release, action.get("asset_name"))
+        bin_path = manager.resolve_target_path(
+            {**action, "target_dir": str(action.get("target_dir", "firmware"))},
+            download_file,
+        )
+
+        if not force and bin_path.exists() and clean_firmware_version(current_version) == version:
+            manager.update_progress(
+                feature_id,
+                action_id=action_id,
+                action_type=self.action_type,
+                target=target_name,
+                phase="complete",
+                status="current",
+                percent=percent_end,
+                message="Sensor ECU OTA가 최신 버전입니다",
+                active=False,
+            )
+            return OtaPackageResult(
+                feature_id=feature_id,
+                action_id=action_id,
+                action_type=self.action_type,
+                target=target_name,
+                downloaded=True,
+                applied=True,
+                updated=False,
+                path=bin_path,
+                version=version,
+                release_tag=release_tag,
+                release_url=str(release_url) if release_url else None,
+                asset_name=download_file,
+                downloaded_at=None,
+                checked_at=checked_at,
+            )
+
+        manager.update_progress(
+            feature_id,
+            action_id=action_id,
+            action_type=self.action_type,
+            target=target_name,
+            phase="download",
+            status="downloading",
+            percent=percent_start,
+            message="Sensor ECU 펌웨어 다운로드 중",
+            active=True,
+        )
+        firmware_bytes, asset_name = manager.download_release_bin_asset(
+            release,
+            download_file,
+            progress={
+                "feature_id": feature_id,
+                "action_id": action_id,
+                "action_type": self.action_type,
+                "target": target_name,
+                "message": "Sensor ECU 펌웨어 다운로드 중",
+                "percent_start": percent_start,
+                "percent_end": percent_transfer_start,
+            },
+        )
+        bin_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_target = bin_path.with_suffix(bin_path.suffix + ".tmp")
+        temp_target.write_bytes(firmware_bytes)
+        temp_target.replace(bin_path)
+
+        manager.update_progress(
+            feature_id,
+            action_id=action_id,
+            action_type=self.action_type,
+            target=target_name,
+            phase="install",
+            status="flashing",
+            percent=percent_transfer_start,
+            message="ZCU 경유 Sensor ECU CAN OTA 중",
+            active=True,
+            bytes_downloaded=len(firmware_bytes),
+            total_bytes=len(firmware_bytes),
+        )
+        success = manager.flash_sensor_can_ota_via_doip(
+            bin_path,
+            feature_id,
+            action,
+            progress={
+                "feature_id": feature_id,
+                "action_id": action_id,
+                "action_type": self.action_type,
+                "target": target_name,
+                "message": "ZCU 경유 Sensor ECU CAN OTA 중",
+                "percent_start": percent_transfer_start,
+                "percent_end": percent_end,
+            },
+        )
+        manager.update_progress(
+            feature_id,
+            action_id=action_id,
+            action_type=self.action_type,
+            target=target_name,
+            phase="complete" if success else "error",
+            status="complete" if success else "failed",
+            percent=percent_end if success else None,
+            message="Sensor ECU CAN OTA 완료" if success else "Sensor ECU CAN OTA 실패",
+            active=False,
+            bytes_downloaded=len(firmware_bytes),
+            total_bytes=len(firmware_bytes),
+        )
+        return OtaPackageResult(
+            feature_id=feature_id,
+            action_id=action_id,
+            action_type=self.action_type,
+            target=target_name,
+            downloaded=True,
+            applied=success,
+            updated=True,
+            path=bin_path,
+            version=version,
+            release_tag=release_tag,
+            release_url=str(release_url) if release_url else None,
+            asset_name=asset_name,
+            downloaded_at=checked_at,
+            checked_at=checked_at,
+            error=None if success else "Sensor ECU CAN OTA failed",
+        )
+
+
+def action_progress_span(action: dict[str, Any]) -> tuple[int, int]:
+    start = int(action.get("progress_start", 0))
+    end = int(action.get("progress_end", 100))
+    start = max(0, min(100, start))
+    end = max(0, min(100, end))
+    if end < start:
+        end = start
+    return start, end
 
 
 def clean_version(tag: str | None) -> str | None:
@@ -492,6 +667,7 @@ class OtaManager:
             LocalFileAction.action_type: LocalFileAction(),
             GithubReleaseFileAction.action_type: GithubReleaseFileAction(),
             DoipUdsFlashAction.action_type: DoipUdsFlashAction(),
+            DoipSensorCanOtaAction.action_type: DoipSensorCanOtaAction(),
         }
 
     def _enter_flash(self) -> None:
@@ -1064,6 +1240,265 @@ class OtaManager:
                     pass
             self._leave_flash()
 
+    def flash_sensor_can_ota_via_doip(
+        self,
+        bin_path: Path,
+        feature_id: str,
+        action: dict[str, Any],
+        *,
+        progress: dict[str, Any] | None = None,
+    ) -> bool:
+        firmware = bin_path.read_bytes()
+        total = len(firmware)
+        if total == 0:
+            raise ValueError("firmware bin is empty")
+
+        ecu_ip = str(action.get("ecu_ip", "192.168.10.2"))
+        doip_port = int(action.get("doip_port", 13401))
+        tester_address = int(action.get("tester_address", 0x0E00))
+        zcu_address = int(action.get("ecu_address", action.get("zcu_address", 0x0001)))
+        app_addr = int(action.get("app_addr", action.get("bank_start", 0x80020000)))
+        block_size = int(action.get("block_size", 32))
+        request_timeout = float(action.get("timeout_seconds", 60.0))
+        block_delay = float(action.get("block_delay_seconds", 0.005))
+        activate = bool(action.get("activate_after_transfer", False))
+
+        if block_size <= 0 or block_size > 32:
+            raise ValueError("block_size must be 1..32 for Sensor ECU CAN OTA gateway")
+
+        crc32 = zlib.crc32(firmware) & 0xFFFFFFFF
+
+        def fail(message: str) -> None:
+            if progress:
+                self.update_progress(
+                    str(progress["feature_id"]),
+                    action_id=str(progress["action_id"]),
+                    action_type=str(progress["action_type"]),
+                    target=str(progress["target"]),
+                    phase="error",
+                    status="failed",
+                    percent=None,
+                    message=message,
+                    active=False,
+                    bytes_downloaded=None,
+                    total_bytes=total,
+                )
+            raise RuntimeError(message)
+
+        def set_progress(
+            phase: str,
+            status: str,
+            percent: int | None,
+            message: str,
+            *,
+            offset: int = 0,
+            active: bool = True,
+        ) -> None:
+            if not progress:
+                return
+            self.update_progress(
+                str(progress["feature_id"]),
+                action_id=str(progress["action_id"]),
+                action_type=str(progress["action_type"]),
+                target=str(progress["target"]),
+                phase=phase,
+                status=status,
+                percent=percent,
+                message=message,
+                active=active,
+                bytes_downloaded=offset,
+                total_bytes=total,
+            )
+
+        stage = "connecting Sensor ECU OTA DoIP gateway"
+        try:
+            self._enter_flash()
+            with socket.create_connection((ecu_ip, doip_port), timeout=request_timeout) as sock:
+                sock.settimeout(request_timeout)
+                set_progress("install", "flashing", None, f"DoIP gateway connected: {ecu_ip}:{doip_port}")
+
+                stage = "routing activation"
+                self._sensor_gateway_activate_routing(sock, tester_address)
+                set_progress("install", "flashing", None, "Sensor OTA routing activation OK")
+
+                stage = "DiagnosticSessionControl extended"
+                response = self._sensor_gateway_send_uds(
+                    sock,
+                    bytes([0x10, 0x03]),
+                    tester_address,
+                    zcu_address,
+                    request_timeout,
+                )
+                self._expect_uds_positive(response, 0x10)
+
+                stage = f"RequestDownload addr=0x{app_addr:08X} size={total}"
+                request_download = bytes([0x34, 0x00, 0x44]) + app_addr.to_bytes(4, "big") + total.to_bytes(4, "big")
+                response = self._sensor_gateway_send_uds(
+                    sock,
+                    request_download,
+                    tester_address,
+                    zcu_address,
+                    request_timeout,
+                )
+                self._expect_uds_positive(response, 0x34)
+
+                if len(response) >= 4:
+                    max_block = int.from_bytes(response[2:4], "big")
+                    data_block_size = max(1, min(block_size, max_block - 2))
+                else:
+                    data_block_size = block_size
+                set_progress("install", "flashing", None, f"Sensor RequestDownload OK: block={data_block_size}")
+
+                offset = 0
+                seq = 1
+                block_count = 0
+                percent_start = int((progress or {}).get("percent_start", 0))
+                percent_end = int((progress or {}).get("percent_end", 100))
+                last_percent: int | None = None
+
+                while offset < total:
+                    chunk = firmware[offset:offset + data_block_size]
+                    stage = f"TransferData seq={seq} offset={offset}/{total}"
+                    response = self._sensor_gateway_send_uds(
+                        sock,
+                        bytes([0x36, seq]) + chunk,
+                        tester_address,
+                        zcu_address,
+                        request_timeout,
+                    )
+                    self._expect_uds_positive(response, 0x36)
+                    if len(response) >= 2 and response[1] != seq:
+                        raise RuntimeError(
+                            f"TransferData sequence mismatch: sent=0x{seq:02X}, got=0x{response[1]:02X}"
+                        )
+                    if block_delay > 0:
+                        time.sleep(block_delay)
+
+                    offset += len(chunk)
+                    seq = 0 if seq >= 0xFF else seq + 1
+                    block_count += 1
+                    raw_percent = min(100, int(offset * 100 / total))
+                    percent = percent_start + int(raw_percent * (percent_end - percent_start) / 100)
+                    if percent != last_percent:
+                        last_percent = percent
+                        set_progress(
+                            "install",
+                            "flashing",
+                            percent,
+                            str((progress or {}).get("message", "Sensor ECU CAN OTA")),
+                            offset=offset,
+                        )
+
+                stage = f"RequestTransferExit crc32=0x{crc32:08X}"
+                response = self._sensor_gateway_send_uds(
+                    sock,
+                    bytes([0x37]) + crc32.to_bytes(4, "big"),
+                    tester_address,
+                    zcu_address,
+                    request_timeout,
+                )
+                self._expect_uds_positive(response, 0x37)
+                set_progress(
+                    "install",
+                    "flashing",
+                    percent_end,
+                    f"Sensor TransferExit OK: blocks={block_count}",
+                    offset=total,
+                )
+
+                if activate:
+                    stage = "ECUReset"
+                    response = self._sensor_gateway_send_uds(
+                        sock,
+                        bytes([0x11, 0x01]),
+                        tester_address,
+                        zcu_address,
+                        request_timeout,
+                    )
+                    self._expect_uds_positive(response, 0x11)
+
+            return True
+        except Exception as exc:
+            fail(f"Sensor ECU CAN OTA failed during {stage}: {type(exc).__name__}: {exc}")
+        finally:
+            self._leave_flash()
+
+    @staticmethod
+    def _build_doip(payload_type: int, payload: bytes) -> bytes:
+        version = 0x02
+        header = struct.pack(">BBHI", version, (~version) & 0xFF, payload_type, len(payload))
+        return header + payload
+
+    @staticmethod
+    def _recv_exact(sock: socket.socket, length: int) -> bytes:
+        chunks: list[bytes] = []
+        remaining = length
+        while remaining > 0:
+            chunk = sock.recv(remaining)
+            if not chunk:
+                raise RuntimeError("socket closed while waiting for DoIP response")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    @classmethod
+    def _recv_doip(cls, sock: socket.socket) -> tuple[int, bytes]:
+        header = cls._recv_exact(sock, 8)
+        version, inverse, payload_type, payload_len = struct.unpack(">BBHI", header)
+        if version != 0x02 or inverse != ((~0x02) & 0xFF):
+            raise RuntimeError(f"bad DoIP header: version=0x{version:02X}, inverse=0x{inverse:02X}")
+        return payload_type, cls._recv_exact(sock, payload_len)
+
+    @classmethod
+    def _sensor_gateway_activate_routing(cls, sock: socket.socket, tester_address: int) -> None:
+        payload = struct.pack(">HB", tester_address, 0x00) + b"\x00\x00\x00\x00"
+        sock.sendall(cls._build_doip(0x0005, payload))
+        payload_type, response = cls._recv_doip(sock)
+        if payload_type != 0x0006:
+            raise RuntimeError(f"expected routing activation response, got 0x{payload_type:04X}")
+        if len(response) < 5 or response[4] != 0x10:
+            code = response[4] if len(response) >= 5 else None
+            raise RuntimeError(f"routing activation failed: code={code}")
+
+    @classmethod
+    def _sensor_gateway_send_uds(
+        cls,
+        sock: socket.socket,
+        uds: bytes,
+        tester_address: int,
+        zcu_address: int,
+        timeout_seconds: float,
+    ) -> bytes:
+        diag_payload = struct.pack(">HH", tester_address, zcu_address) + uds
+        sock.sendall(cls._build_doip(0x8001, diag_payload))
+        deadline = time.monotonic() + timeout_seconds
+
+        while time.monotonic() < deadline:
+            sock.settimeout(max(0.1, deadline - time.monotonic()))
+            payload_type, payload = cls._recv_doip(sock)
+            if payload_type == 0x8002:
+                if len(payload) >= 5 and payload[4] != 0x00:
+                    raise RuntimeError(f"diagnostic ACK failed: code=0x{payload[4]:02X}")
+                continue
+            if payload_type != 0x8001:
+                raise RuntimeError(f"unexpected DoIP payload type: 0x{payload_type:04X}")
+            if len(payload) < 4:
+                raise RuntimeError("short diagnostic response")
+            response = payload[4:]
+            if len(response) >= 3 and response[0] == 0x7F:
+                raise RuntimeError(f"UDS negative response: sid=0x{response[1]:02X}, nrc=0x{response[2]:02X}")
+            return response
+
+        raise RuntimeError("timeout waiting for diagnostic response")
+
+    @staticmethod
+    def _expect_uds_positive(response: bytes, expected_sid: int) -> None:
+        if not response:
+            raise RuntimeError("empty UDS response")
+        expected = (expected_sid + 0x40) & 0xFF
+        if response[0] != expected:
+            raise RuntimeError(f"unexpected UDS response for 0x{expected_sid:02X}: {response.hex(' ').upper()}")
+
     def clear_downloaded_feature_packages(self) -> list[str]:
         removed: list[str] = []
         if not self.downloaded_features_dir.exists():
@@ -1108,6 +1543,7 @@ class OtaManager:
                 "local_file": "implemented",
                 "github_release_file": "implemented",
                 "doip_uds_flash": "implemented",
+                "doip_sensor_can_ota": "implemented",
             },
             "downloaded_features_dir": str(self.downloaded_features_dir),
             "firmware_dir": str(self.firmware_dir),
