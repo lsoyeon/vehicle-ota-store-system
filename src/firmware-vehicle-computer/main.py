@@ -2159,12 +2159,19 @@ def api_server_worker(
         if FRONTEND_DIR.exists():
             app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
+        def no_store_headers() -> dict[str, str]:
+            return {
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            }
+
         @app.get("/", include_in_schema=False)
         async def index() -> FileResponse:
             dashboard_index = FRONTEND_DIR / "index.html"
             if not dashboard_index.exists():
                 raise HTTPException(status_code=404, detail="dashboard index.html not found")
-            return FileResponse(dashboard_index)
+            return FileResponse(dashboard_index, headers=no_store_headers())
 
         @app.get("/store", include_in_schema=False)
         @app.get("/store.html", include_in_schema=False)
@@ -2172,7 +2179,7 @@ def api_server_worker(
             dashboard_store = FRONTEND_DIR / "store.html"
             if not dashboard_store.exists():
                 raise HTTPException(status_code=404, detail="dashboard store.html not found")
-            return FileResponse(dashboard_store)
+            return FileResponse(dashboard_store, headers=no_store_headers())
 
         @app.get("/themes/{theme_id}.css", include_in_schema=False)
         async def theme_css(theme_id: str) -> Response:
@@ -2562,13 +2569,26 @@ def api_server_worker(
                         return
                     out_queue.put((stream_name, chunk))
 
-            shell_cmd = [
-                os.getenv("VEHICLE_DEBUG_SHELL", "powershell.exe"),
-                "-NoLogo",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-            ]
+            debug_service = os.getenv("VEHICLE_DEBUG_JOURNAL_SERVICE", "vehicle-computer-app.service")
+            if os.name == "nt":
+                shell_cmd = [
+                    os.getenv("VEHICLE_DEBUG_SHELL", "powershell.exe"),
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                ]
+                debug_label = "PowerShell"
+            else:
+                shell_cmd = [
+                    os.getenv("VEHICLE_DEBUG_JOURNALCTL", "journalctl"),
+                    "-u",
+                    debug_service,
+                    "-f",
+                    "-n",
+                    os.getenv("VEHICLE_DEBUG_JOURNAL_LINES", "80"),
+                ]
+                debug_label = " ".join(shell_cmd)
             creationflags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
             try:
                 process = subprocess.Popen(
@@ -2602,7 +2622,7 @@ def api_server_worker(
                 {
                     "type": "output",
                     "stream": "stdout",
-                    "data": f"Debug terminal ready: {BASE_DIR}\n",
+                    "data": f"Debug terminal ready: {debug_label}\n",
                 }
             )
 

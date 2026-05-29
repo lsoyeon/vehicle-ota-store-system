@@ -4,7 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Smart Vehicle Dashboard</title>
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;800&family=Noto+Sans+KR:wght@300;400;500;700&family=Nunito:wght@400;700;800;900&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;800&family=Noto+Sans+KR:wght@300;400;500;700&family=Nunito:wght@400;700;800;900&display=swap" onload="this.onload=null;this.rel='stylesheet'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;800&family=Noto+Sans+KR:wght@300;400;500;700&family=Nunito:wght@400;700;800;900&display=swap"></noscript>
 <style>
 /* ══════════════════════════════
    테마 변수
@@ -475,7 +478,7 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
     </div>
     <div class="term-box" id="termout"></div>
     <div class="term-input-row">
-      <input class="term-input" id="terminput" autocomplete="off" spellcheck="false" placeholder="PowerShell command">
+      <input class="term-input" id="terminput" autocomplete="off" spellcheck="false" placeholder="journalctl log stream">
       <button class="term-send" onclick="sendTermCommand()">SEND</button>
     </div>
   </div>
@@ -552,6 +555,13 @@ function connectWS() {
     setVehicleLink({status:'disconnected'});
   };
   ws.onclose = () => setTimeout(connectWS, 3000);
+}
+
+async function loadInitialStatus() {
+  try {
+    const r = await fetch('/api/status', {cache:'no-store'});
+    if(r.ok) updateDash(await r.json());
+  } catch {}
 }
 
 function dispatch(d) {
@@ -1268,7 +1278,8 @@ async function pollFlashProgress() {
 }
 
 connectWS();
-loadWeather();
+loadInitialStatus();
+window.addEventListener('load', () => setTimeout(loadWeather, 500));
 setInterval(loadWeather,5*60*1000);
 </script>
 </body>
