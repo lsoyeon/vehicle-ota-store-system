@@ -14,6 +14,9 @@
 #include "UART_VCOM.h"
 #include "IfxAsclin_Asc.h"
 #include <stdio.h>
+
+#define APP_SENSOR_VERSION "1.0.0"
+
 #define SLOW
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 

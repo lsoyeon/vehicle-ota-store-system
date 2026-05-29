@@ -80,6 +80,11 @@
 #define CAN_ID_UDS_REQUEST            CAN_ID_OTA_REQUEST
 #define CAN_ID_UDS_RESPONSE           CAN_ID_OTA_RESPONSE
 
+/* version 관리 */
+#define CAN_ID_VERSION_REQUEST          0x700U
+#define CAN_ID_FRONTZCU_VERSION         0x701U
+#define CAN_ID_DRIVE_VERSION            0x702U
+#define CAN_ID_SENSOR_VERSION           0x703U
 
 /* ============================================================
    DLC 정의
@@ -89,7 +94,7 @@
 #define CAN_DLC_VEHICLE_CONTROL_CMD   3U
 #define CAN_DLC_TOF_DISTANCE_DATA     2U
 #define CAN_DLC_SPEED_DATA            2U
-
+#define CAN_DLC_ECU_VERSION           8U
 #define CAN_CLASSIC_MAX_DLC           8U
 #define CANFD_MAX_DLC                 64U
 

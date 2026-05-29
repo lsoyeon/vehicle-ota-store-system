@@ -16,6 +16,8 @@
 #ifndef MCMCAN_H_
 #define MCMCAN_H_
 
+#define APP_FRONTZCU_VERSION "1.0.0"
+
 #include <stdint.h>
 #include <string.h>
 

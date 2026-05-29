@@ -517,6 +517,16 @@ void CanIf_onReceive(uint32 id, const uint8_t *data, uint8_t length)
 
             break;
         }
+        case CAN_ID_VERSION_REQUEST:
+        {
+            /* ZCU에서 버전 요청이 오면 0x703 Sensor Version을 송신한다. */
+            const char *versionStr = APP_FRONTZCU_VERSION;
+            uint8_t versionData[CAN_DLC_ECU_VERSION] = {0};
+            strncpy((char *)versionData, versionStr, CAN_DLC_ECU_VERSION);
+
+            CanIf_sendClassic(CAN_ID_SENSOR_VERSION, versionData, CAN_DLC_ECU_VERSION);
+            break;
+        }
 
         default:
         {
@@ -663,11 +673,12 @@ static void initCanNode0(void)
     g_mcmcan.canNodeConfig.rxConfig.rxBufferDataFieldSize = IfxCan_DataFieldSize_64;
 
     /*
-     * Standard ID filter 1개:
+     * Standard ID filter 2개:
      * 0x600 UDS OTA Request
+     * 0x700 Version Request
      */
     g_mcmcan.canNodeConfig.filterConfig.messageIdLength = IfxCan_MessageIdLength_standard;
-    g_mcmcan.canNodeConfig.filterConfig.standardListSize = 1U;
+    g_mcmcan.canNodeConfig.filterConfig.standardListSize = 2U;
     g_mcmcan.canNodeConfig.filterConfig.extendedListSize = 0U;
 
     g_mcmcan.canNodeConfig.filterConfig.standardFilterForNonMatchingFrames =
@@ -708,10 +719,12 @@ static void initCanNode0(void)
  * @brief Sensor ECU Node0 RX Filter 설정
  *
  * 0x600 UDS OTA Request -> RxBuffer0
+ * 0x700 Version Request -> RxBuffer1
  */
 static void initSensorNode0RxFilters(void)
 {
     setNode0StandardFilter(0U, CAN_ID_OTA_REQUEST, IfxCan_RxBufferId_0);
+    setNode0StandardFilter(1U, CAN_ID_VERSION_REQUEST, IfxCan_RxBufferId_1);
 }
 
 
@@ -904,6 +917,10 @@ static void readNode0UpdatedRxBuffers(void)
     if(IfxCan_Node_isRxBufferNewDataUpdated(g_mcmcan.canNode.node, IfxCan_RxBufferId_0))
     {
         readNode0RxBuffer(IfxCan_RxBufferId_0);
+    }
+    if(IfxCan_Node_isRxBufferNewDataUpdated(g_mcmcan.canNode.node, IfxCan_RxBufferId_1))
+    {
+        readNode0RxBuffer(IfxCan_RxBufferId_1);
     }
 }
 
