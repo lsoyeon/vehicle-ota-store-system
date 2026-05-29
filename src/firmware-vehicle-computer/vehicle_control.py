@@ -794,6 +794,29 @@ class VehicleControl:
             )
             return self.snapshot()
 
+    def trigger_fvsa_buzzer(self) -> dict:
+        with self._lock:
+            if not self._feature_can_run(self._fvsa) or self._fvsa.instance is None:
+                return {"ok": False, "control": self.snapshot(), "message": "FVSA is not applied"}
+
+            if hasattr(self._fvsa.instance, "ring_buzzer"):
+                self._fvsa.instance.ring_buzzer()
+            elif hasattr(self._fvsa.instance, "_beep"):
+                self._fvsa.instance._beep()
+            else:
+                return {"ok": False, "control": self.snapshot(), "message": "FVSA buzzer hook is unavailable"}
+
+            self._snapshot = VehicleControlSnapshot(
+                joystick=self._snapshot.joystick,
+                lkas=self._snapshot.lkas,
+                fvsa=self._update_fvsa(self._snapshot.joystick),
+                aeb=self._snapshot.aeb,
+                control_payload_hex=self._snapshot.control_payload_hex,
+                control_packet_hex=self._snapshot.control_packet_hex,
+                updated_at=utc_now(),
+            )
+            return {"ok": True, "control": self.snapshot(), "message": "FVSA buzzer triggered"}
+
     def set_aeb_enabled(self, enabled: bool) -> dict:
         with self._lock:
             if enabled and not self._feature_can_run(self._aeb):

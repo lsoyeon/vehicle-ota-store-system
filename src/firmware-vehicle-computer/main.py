@@ -2515,6 +2515,14 @@ def api_server_worker(
                 ],
             }
 
+        @app.post("/api/demo/fvsa-buzzer")
+        async def demo_fvsa_buzzer() -> dict:
+            heartbeat()
+            result = vehicle_control.trigger_fvsa_buzzer()
+            if not result.get("ok"):
+                raise HTTPException(status_code=400, detail=result.get("message", "FVSA buzzer failed"))
+            return {"success": True, **result}
+
         @app.websocket("/ws")
         async def websocket_status(websocket: WebSocket) -> None:
             await websocket.accept()

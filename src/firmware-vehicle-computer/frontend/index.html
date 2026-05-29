@@ -459,6 +459,7 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
     <button class="dbtn" onclick="checkLatestVersions()">최신버전 확인</button>
     <div class="dsec">안전</div>
     <button class="dbtn" onclick="demoAEB()">🚨 AEB 긴급 제동</button>
+    <button class="dbtn" onclick="demoFvsaBuzzer()">🔔 FVSA 벨 울리기</button>
     <div class="dsec">설정</div>
     <button class="dbtn" onclick="openDebugTerminal()">Debug Terminal</button>
     <button class="dbtn" onclick="openFlasher()">Manual Flasher</button>
@@ -1080,6 +1081,19 @@ async function checkLatestVersions() {
 }
 
 function demoAEB(){triggerAEB();toggleDemo();}
+
+async function demoFvsaBuzzer() {
+  toggleDemo();
+  try {
+    const r = await fetch('/api/demo/fvsa-buzzer', {method:'POST'});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail || 'FVSA 벨 울리기 실패');
+    const fvsa = d.control?.fvsa?.value || {};
+    toast(fvsa.buzzer_error || 'FVSA 벨 울림');
+  } catch(e) {
+    toast(e.message || 'FVSA 벨 울리기 실패');
+  }
+}
 
 async function demoResetSettings() {
   toggleDemo();
