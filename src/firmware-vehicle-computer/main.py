@@ -2562,7 +2562,7 @@ def api_server_worker(
             def read_stream(stream: Any, stream_name: str) -> None:
                 while True:
                     try:
-                        chunk = stream.read(1)
+                        chunk = stream.readline()
                     except OSError:
                         return
                     if not chunk:
@@ -2630,10 +2630,17 @@ def api_server_worker(
                 nonlocal connected
                 while connected and (process.poll() is None or not out_queue.empty()):
                     heartbeat()
+                    batches: dict[str, list[str]] = {}
+                    batch_chars = 0
                     while connected and not out_queue.empty():
                         stream_name, chunk = out_queue.get_nowait()
-                        await safe_send({"type": "output", "stream": stream_name, "data": chunk})
-                    await asyncio.sleep(0.03)
+                        batches.setdefault(stream_name, []).append(chunk)
+                        batch_chars += len(chunk)
+                        if batch_chars >= 16000:
+                            break
+                    for stream_name, chunks in batches.items():
+                        await safe_send({"type": "output", "stream": stream_name, "data": "".join(chunks)})
+                    await asyncio.sleep(0.01)
                 await safe_send({"type": "exit", "code": process.returncode})
 
             async def receive_input() -> None:
