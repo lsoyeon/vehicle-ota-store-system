@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import socket
 import struct
@@ -610,36 +611,22 @@ def clean_firmware_version(tag: str | None) -> str | None:
     value = clean_version(tag)
     if not value:
         return None
-    parts: list[str] = []
-    for part in value.replace("-", ".").replace("_", ".").split("."):
-        digits = "".join(ch for ch in part if ch.isdigit())
-        if digits == "":
-            break
-        parts.append(str(int(digits)))
-        if len(parts) == 3:
-            break
-    if not parts:
+    match = re.search(r"(?<!\d)(\d+)[._-](\d+)[._-](\d+)(?!\d)", value)
+    if match:
+        return ".".join(str(int(part)) for part in match.groups())
+
+    match = re.search(r"(?<!\d)(\d+)[._-](\d+)(?!\d)", value)
+    if not match:
         return None
-    while len(parts) < 3:
-        parts.append("0")
-    return ".".join(parts)
+    return f"{int(match.group(1))}.{int(match.group(2))}.0"
 
 
 def release_version_tuple(tag: str | None) -> tuple[int, int, int] | None:
-    value = clean_version(tag)
-    if not value:
+    normalized = clean_firmware_version(tag)
+    if not normalized:
         return None
-    parts: list[int] = []
-    for part in value.replace("-", ".").replace("_", ".").split("."):
-        digits = "".join(ch for ch in part if ch.isdigit())
-        if digits == "":
-            break
-        parts.append(int(digits))
-        if len(parts) == 3:
-            break
-    if len(parts) < 3:
-        return None
-    return parts[0], parts[1], parts[2]
+    major, minor, patch = normalized.split(".", 2)
+    return int(major), int(minor), int(patch)
 
 
 class OtaManager:
@@ -1083,12 +1070,16 @@ class OtaManager:
 
         firmware = bin_path.read_bytes()
         total = len(firmware)
+        if total == 0:
+            raise ValueError("firmware bin is empty")
+
         ecu_ip = str(action.get("ecu_ip", "192.168.10.2"))
         doip_port = int(action.get("doip_port", 13400))
-        tester_address = int(action.get("tester_address", 0x0E00))
         ecu_address = int(action.get("ecu_address", 0x0001))
         bank_start = int(action.get("bank_start", 0x80300000))
         request_timeout = float(action.get("timeout_seconds", 60.0))
+        percent_start = int((progress or {}).get("percent_start", 50))
+        percent_end = int((progress or {}).get("percent_end", 100))
 
         def fail(message: str, *, offset: int = 0) -> None:
             if progress:
@@ -1151,13 +1142,13 @@ class OtaManager:
             uds_connection = DoIPClientUDSConnector(doip_connection)
             client = Client(uds_connection, request_timeout=request_timeout)
 
-            set_progress("install", "flashing", None, f"DoIP connected: {ecu_ip}:{doip_port}")
+            set_progress("install", "flashing", percent_start, f"DoIP connected: {ecu_ip}:{doip_port}")
             with client:
                 stage = "DiagnosticSessionControl extended"
                 client.change_session(
                     udsoncan.services.DiagnosticSessionControl.Session.extendedDiagnosticSession
                 )
-                set_progress("install", "flashing", None, "Extended Session active")
+                set_progress("install", "flashing", percent_start, "Extended Session active")
 
                 memory_location = udsoncan.MemoryLocation(
                     address=bank_start,
@@ -1172,14 +1163,12 @@ class OtaManager:
                 set_progress(
                     "install",
                     "flashing",
-                    None,
+                    percent_start,
                     f"RequestDownload complete: addr=0x{bank_start:08X} maxBlock={max_block}",
                 )
 
                 offset = 0
                 sequence = 1
-                percent_start = int((progress or {}).get("percent_start", 50))
-                percent_end = int((progress or {}).get("percent_end", 100))
                 last_percent: int | None = None
 
                 while offset < total:
@@ -1262,6 +1251,8 @@ class OtaManager:
         request_timeout = float(action.get("timeout_seconds", 60.0))
         block_delay = float(action.get("block_delay_seconds", 0.005))
         activate = bool(action.get("activate_after_transfer", False))
+        percent_start = int((progress or {}).get("percent_start", 0))
+        percent_end = int((progress or {}).get("percent_end", 100))
 
         if block_size <= 0 or block_size > 32:
             raise ValueError("block_size must be 1..32 for Sensor ECU CAN OTA gateway")
@@ -1315,11 +1306,11 @@ class OtaManager:
             self._enter_flash()
             with socket.create_connection((ecu_ip, doip_port), timeout=request_timeout) as sock:
                 sock.settimeout(request_timeout)
-                set_progress("install", "flashing", None, f"DoIP gateway connected: {ecu_ip}:{doip_port}")
+                set_progress("install", "flashing", percent_start, f"DoIP gateway connected: {ecu_ip}:{doip_port}")
 
                 stage = "routing activation"
                 self._sensor_gateway_activate_routing(sock, tester_address)
-                set_progress("install", "flashing", None, "Sensor OTA routing activation OK")
+                set_progress("install", "flashing", percent_start, "Sensor OTA routing activation OK")
 
                 stage = "DiagnosticSessionControl extended"
                 response = self._sensor_gateway_send_uds(
@@ -1347,13 +1338,11 @@ class OtaManager:
                     data_block_size = max(1, min(block_size, max_block - 2))
                 else:
                     data_block_size = block_size
-                set_progress("install", "flashing", None, f"Sensor RequestDownload OK: block={data_block_size}")
+                set_progress("install", "flashing", percent_start, f"Sensor RequestDownload OK: block={data_block_size}")
 
                 offset = 0
                 seq = 1
                 block_count = 0
-                percent_start = int((progress or {}).get("percent_start", 0))
-                percent_end = int((progress or {}).get("percent_end", 100))
                 last_percent: int | None = None
 
                 while offset < total:

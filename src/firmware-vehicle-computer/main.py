@@ -12,6 +12,7 @@ import base64
 import binascii
 import json
 import logging
+import re
 import socket
 import subprocess
 import threading
@@ -348,19 +349,15 @@ def firmware_version(version: str | None) -> str | None:
     value = str(version).strip()
     if value.lower().startswith("v"):
         value = value[1:]
-    parts: list[int] = []
-    for part in value.replace("-", ".").replace("_", ".").split("."):
-        digits = "".join(ch for ch in part if ch.isdigit())
-        if digits == "":
-            break
-        parts.append(int(digits))
-        if len(parts) == 3:
-            break
-    if not parts:
+    match = re.search(r"(?<!\d)(\d+)[._-](\d+)[._-](\d+)(?!\d)", value)
+    if match:
+        major, minor, patch = (int(part) for part in match.groups())
+        return f"{major}.{minor}.{patch}"
+
+    match = re.search(r"(?<!\d)(\d+)[._-](\d+)(?!\d)", value)
+    if not match:
         return None
-    while len(parts) < 3:
-        parts.append(0)
-    return f"{parts[0]}.{parts[1]}.{parts[2]}"
+    return f"{int(match.group(1))}.{int(match.group(2))}.0"
 
 
 def firmware_version_tuple(version: str | None) -> tuple[int, int, int]:
@@ -373,6 +370,33 @@ def firmware_version_tuple(version: str | None) -> tuple[int, int, int]:
 
 def firmware_version_gt(candidate: str | None, current: str | None) -> bool:
     return firmware_version_tuple(candidate) > firmware_version_tuple(current)
+
+
+def ota_target_display_name(target: Any) -> str:
+    return {
+        "zcu": "ZCU",
+        "front-zcu": "Front ZCU",
+        "sensor-ecu": "Sensor ECU",
+        "drive-ecu": "Drive ECU",
+    }.get(str(target or "zcu"), str(target or "zcu"))
+
+
+def firmware_target_versions(record: dict[str, Any]) -> dict[str, str]:
+    zcu_ota = record.get("zcu_ota", {})
+    raw_versions = zcu_ota.get("versions", {}) if isinstance(zcu_ota, dict) else {}
+    versions: dict[str, str] = {}
+    if isinstance(raw_versions, dict):
+        for target, version in raw_versions.items():
+            normalized = firmware_version(str(version)) or str(version or "")
+            if normalized:
+                versions[str(target)] = normalized
+
+    if not versions and isinstance(zcu_ota, dict) and zcu_ota.get("version"):
+        target = ota_target_display_name(zcu_ota.get("target", "zcu"))
+        version = firmware_version(str(zcu_ota["version"])) or str(zcu_ota["version"])
+        versions[target] = version
+
+    return versions
 
 
 def python_module_version(path: Path | None) -> str | None:
@@ -593,6 +617,7 @@ class FeatureStateStore:
                 "release_tag": None,
                 "release_url": None,
                 "asset_name": None,
+                "versions": {},
                 "downloaded_at": None,
                 "applied_at": None,
                 "checked_at": None,
@@ -727,6 +752,7 @@ class FeatureStateStore:
                         "release_tag": raw_ota.get("release_tag"),
                         "release_url": raw_ota.get("release_url"),
                         "asset_name": raw_ota.get("asset_name"),
+                        "versions": raw_ota.get("versions") if isinstance(raw_ota.get("versions"), dict) else {},
                         "downloaded_at": raw_ota.get("downloaded_at"),
                         "applied_at": raw_ota.get("applied_at"),
                         "checked_at": raw_ota.get("checked_at"),
@@ -820,12 +846,7 @@ class FeatureStateStore:
     ) -> dict:
         feature_id = item["id"]
         target = action.get("target", "zcu")
-        target_name = {
-            "zcu": "ZCU",
-            "front-zcu": "Front ZCU",
-            "sensor-ecu": "Sensor ECU",
-            "drive-ecu": "Drive ECU",
-        }.get(str(target), str(target))
+        target_name = ota_target_display_name(target)
         if ota_kind == "initial_install":
             full_name = f"{item.get('name', feature_id)} {target_name} initial install"
         elif update_scope == "firmware":
@@ -877,16 +898,23 @@ class FeatureStateStore:
         if not actions:
             return
         pending = data.setdefault("pending_ota", {"to_install": [], "to_update": [], "checked_at": None})
+        firmware_versions = firmware_target_versions(record)
         for action in actions:
+            target_name = ota_target_display_name(action.get("target", "zcu"))
+            latest_version = (
+                firmware_versions.get(target_name)
+                or record.get("version")
+                or item.get("latest_version")
+            )
             pending_item = self._pending_item(
                 item,
                 action,
                 record,
                 ota_kind="initial_install",
                 update_scope="install",
-                current_version=firmware_version(record["zcu_ota"].get("version")),
-                latest_version=record.get("version") or item.get("latest_version"),
-                latest_versions={"ZCU": record.get("version") or item.get("latest_version")},
+                current_version=firmware_version(firmware_versions.get(target_name)),
+                latest_version=latest_version,
+                latest_versions=firmware_versions or {target_name: latest_version},
             )
             self._upsert_pending_unlocked(pending, "to_install", pending_item)
         pending["checked_at"] = utc_now()
@@ -1057,9 +1085,11 @@ class FeatureStateStore:
                             self._upsert_pending_unlocked(next_pending, "to_update", update_item)
 
                 zcu = record["zcu_ota"]
+                firmware_versions = firmware_target_versions(record)
                 for action in self._zcu_actions(item):
                     if not zcu.get("applied"):
                         continue
+                    target_name = ota_target_display_name(action.get("target", "zcu"))
                     try:
                         release = self.ota_manager.fetch_latest_release(item, action)
                     except Exception as exc:
@@ -1068,7 +1098,7 @@ class FeatureStateStore:
                         continue
 
                     latest_version = firmware_version(str(release.get("tag_name") or "")) or "0.0.0"
-                    current_version = firmware_version(zcu.get("version"))
+                    current_version = firmware_version(firmware_versions.get(target_name) or zcu.get("version"))
                     if not firmware_version_gt(latest_version, current_version):
                         zcu["checked_at"] = utc_now()
                         zcu["error"] = None
@@ -1082,7 +1112,7 @@ class FeatureStateStore:
                         update_scope="firmware",
                         current_version=current_version,
                         latest_version=latest_version,
-                        latest_versions={"ZCU": latest_version},
+                        latest_versions={target_name: latest_version},
                     )
                     update_item["release_tag"] = release.get("tag_name")
                     update_item["release_url"] = release.get("html_url")
@@ -1097,16 +1127,23 @@ class FeatureStateStore:
         if not actions or not record["zcu_ota"].get("applied"):
             return
         pending = data.setdefault("pending_ota", {"to_install": [], "to_update": [], "checked_at": None})
+        firmware_versions = firmware_target_versions(record)
         for action in actions:
+            target_name = ota_target_display_name(action.get("target", "zcu"))
+            latest_version = (
+                firmware_versions.get(target_name)
+                or record.get("version")
+                or item.get("latest_version")
+            )
             pending_item = self._pending_item(
                 item,
                 action,
                 record,
                 ota_kind="initial_install",
                 update_scope="install",
-                current_version=firmware_version(record["zcu_ota"].get("version")),
-                latest_version=record.get("version") or item.get("latest_version"),
-                latest_versions={"ZCU": firmware_version(record["zcu_ota"].get("version")) or record.get("version")},
+                current_version=firmware_version(firmware_versions.get(target_name)),
+                latest_version=latest_version,
+                latest_versions=firmware_versions or {target_name: latest_version},
             )
             pending_item["reset_required"] = True
             pending_item["full_name"] = f"{item.get('name', item['id'])} ECU reset trigger"
@@ -1165,7 +1202,7 @@ class FeatureStateStore:
                             "success": success,
                             "version": {
                                 FEATURE_VERSION_TARGET: record.get("version"),
-                                "ZCU": firmware_version(zcu.get("version")),
+                                **firmware_target_versions(record),
                             },
                             "error": zcu.get("error") if not success else None,
                         }
@@ -1217,6 +1254,18 @@ class FeatureStateStore:
         package_required = bool(item.get("package_required", True))
         package_progress_end = 25 if package_required else 0
         package = record["package"]
+        if run_flash and force and zcu_actions:
+            self.ota_manager.update_progress(
+                feature_id,
+                action_id="prepare",
+                action_type="ota_sequence",
+                target="vehicle",
+                phase="prepare",
+                status="preparing",
+                percent=0,
+                message=f"{item.get('name', feature_id)} OTA 준비 중",
+                active=True,
+            )
 
         if package_required:
             package_action = dict(self.ota_manager.python_package_action(item))
@@ -1293,14 +1342,24 @@ class FeatureStateStore:
             if not force or not run_flash:
                 continue
             zcu = record["zcu_ota"]
+            target_name = ota_target_display_name(action.get("target", "zcu"))
+            firmware_versions = zcu.setdefault("versions", {})
+            if not isinstance(firmware_versions, dict):
+                firmware_versions = {}
+                zcu["versions"] = firmware_versions
             try:
                 zcu_result = self.ota_manager.run_action(
                     item,
                     action,
-                    current_version=zcu.get("version") or record.get("version"),
+                    current_version=firmware_versions.get(target_name) or zcu.get("version") or record.get("version"),
                     force=force,
                 )
             except Exception as exc:
+                zcu["required"] = True
+                zcu["action_id"] = action.get("id", zcu.get("action_id"))
+                zcu["action_type"] = action.get("type", zcu.get("action_type"))
+                zcu["target"] = action.get("target", zcu.get("target"))
+                zcu["repo"] = action.get("release_repo") or item.get("release_repo")
                 zcu["checked_at"] = utc_now()
                 zcu["error"] = f"{type(exc).__name__}: {exc}"
                 firmware_failed = True
@@ -1323,6 +1382,12 @@ class FeatureStateStore:
             zcu["release_tag"] = zcu_result.release_tag
             zcu["release_url"] = zcu_result.release_url
             zcu["asset_name"] = zcu_result.asset_name or zcu.get("asset_name")
+            if zcu_result.version:
+                normalized_version = firmware_version(zcu_result.version) or zcu_result.version
+                firmware_versions[target_name] = normalized_version
+                zcu["versions"] = firmware_versions
+                if not package_required:
+                    record["version"] = normalized_version
             zcu["checked_at"] = zcu_result.checked_at
             if zcu_result.downloaded_at:
                 zcu["downloaded_at"] = zcu_result.downloaded_at
@@ -1336,6 +1401,18 @@ class FeatureStateStore:
 
         if firmware_failed:
             record["zcu_ota"]["applied"] = False
+        elif run_flash and force and zcu_actions:
+            self.ota_manager.update_progress(
+                feature_id,
+                action_id="complete",
+                action_type="ota_sequence",
+                target="vehicle",
+                phase="complete",
+                status="complete",
+                percent=100,
+                message=f"{item.get('name', feature_id)} OTA 완료",
+                active=False,
+            )
 
         return updated
 
@@ -1413,8 +1490,8 @@ class FeatureStateStore:
             if not item.get("downloadable") or not self._is_record_installed(item, record):
                 continue
             item_versions = {FEATURE_VERSION_TARGET: record["version"]}
-            if record["zcu_ota"].get("applied") and record["zcu_ota"].get("version"):
-                item_versions["ZCU"] = firmware_version(record["zcu_ota"]["version"])
+            if record["zcu_ota"].get("applied"):
+                item_versions.update(firmware_target_versions(record))
             versions[feature_id] = item_versions
         return versions
 
@@ -2384,20 +2461,9 @@ def api_server_worker(
         store_latest_version_cache_lock = threading.Lock()
         store_latest_version_cache_seconds = float(os.getenv("VEHICLE_STORE_VERSION_CACHE_SECONDS", "60"))
 
-        def github_latest_feature_version(item: dict) -> dict:
-            action = None
-            if item.get("package_required", True):
-                try:
-                    action = ota_manager.python_package_action(item)
-                except ValueError:
-                    action = None
-            if action is None:
-                for candidate in ota_manager.actions_for(item):
-                    if candidate.get("release_repo"):
-                        action = candidate
-                        break
-
-            if not action or not action.get("release_repo"):
+        def github_latest_action_version(item: dict, action: dict) -> dict:
+            repo = str(action.get("release_repo") or item.get("release_repo") or "")
+            if not repo:
                 latest_version = firmware_version(item.get("latest_version")) or str(item.get("latest_version") or "")
                 return {
                     "latest_version": latest_version,
@@ -2406,7 +2472,6 @@ def api_server_worker(
                     "latest_version_error": None,
                 }
 
-            repo = str(action.get("release_repo") or item.get("release_repo") or "")
             cache_key = f"{item['id']}:{repo}:{action.get('release_patch_filter', '')}"
             now = time.time()
             with store_latest_version_cache_lock:
@@ -2443,11 +2508,92 @@ def api_server_worker(
                 store_latest_version_cache[cache_key] = {"cached_at": now, "payload": dict(payload)}
             return payload
 
+        def github_latest_feature_version(item: dict) -> dict:
+            actions: list[dict] = []
+            if item.get("package_required", True):
+                try:
+                    actions = [ota_manager.python_package_action(item)]
+                except ValueError:
+                    actions = []
+            else:
+                actions = [
+                    action
+                    for action in ota_manager.actions_for(item)
+                    if action.get("release_repo")
+                ]
+
+            if not actions:
+                for candidate in ota_manager.actions_for(item):
+                    if candidate.get("release_repo"):
+                        actions = [candidate]
+                        break
+
+            if not actions:
+                latest_version = firmware_version(item.get("latest_version")) or str(item.get("latest_version") or "")
+                return {
+                    "latest_version": latest_version,
+                    "latest_versions": {FEATURE_VERSION_TARGET: latest_version} if latest_version else {},
+                    "latest_version_source": "catalog",
+                    "latest_version_checked_at": None,
+                    "latest_version_error": None,
+                }
+
+            if len(actions) == 1:
+                return github_latest_action_version(item, actions[0])
+
+            latest_versions: dict[str, str] = {}
+            repos: dict[str, str] = {}
+            release_tags: dict[str, str] = {}
+            errors: list[str] = []
+            for action in actions:
+                target_name = ota_target_display_name(action.get("target", FEATURE_VERSION_TARGET))
+                payload = github_latest_action_version(item, action)
+                latest_version = str(payload.get("latest_version") or "")
+                if latest_version:
+                    latest_versions[target_name] = latest_version
+                if payload.get("repo"):
+                    repos[target_name] = str(payload["repo"])
+                if payload.get("release_tag"):
+                    release_tags[target_name] = str(payload["release_tag"])
+                if payload.get("latest_version_error"):
+                    errors.append(f"{target_name}: {payload['latest_version_error']}")
+
+            fallback_version = firmware_version(item.get("latest_version")) or str(item.get("latest_version") or "")
+            unique_versions = list(dict.fromkeys(version for version in latest_versions.values() if version))
+            latest_version = (
+                unique_versions[0]
+                if len(unique_versions) == 1
+                else latest_versions.get("ZCU") or (unique_versions[0] if unique_versions else fallback_version)
+            )
+            return {
+                "latest_version": latest_version,
+                "latest_versions": latest_versions or ({FEATURE_VERSION_TARGET: fallback_version} if fallback_version else {}),
+                "latest_version_source": "github" if latest_versions else "catalog",
+                "latest_version_checked_at": utc_now(),
+                "latest_version_error": "; ".join(errors) if errors else None,
+                "release_tags": release_tags,
+                "repos": repos,
+            }
+
         def store_item_version_payload(item: dict, record: dict, installed: bool) -> dict:
+            package_required = bool(item.get("package_required", True))
             package_downloaded = bool(record.get("package", {}).get("downloaded"))
             package_path = store_feature_package_path(record)
             package_version = python_module_version(package_path)
-            recorded_version = firmware_version(record.get("version")) or str(record.get("version") or "")
+            firmware_versions = firmware_target_versions(record)
+            firmware_version_values = [version for version in firmware_versions.values() if version]
+            firmware_display_version = (
+                firmware_version_values[0]
+                if firmware_version_values and len(set(firmware_version_values)) == 1
+                else None
+            )
+            recorded_version = (
+                firmware_display_version
+                if not package_required and firmware_display_version
+                else firmware_version(record.get("version"))
+                or firmware_display_version
+                or str(record.get("version") or "")
+            )
             latest_payload = github_latest_feature_version(item)
             latest_version = str(latest_payload.get("latest_version") or "")
 
@@ -2460,8 +2606,8 @@ def api_server_worker(
             versions = {}
             if downloaded_version:
                 versions[FEATURE_VERSION_TARGET] = downloaded_version
-            if record.get("zcu_ota", {}).get("applied") and record.get("zcu_ota", {}).get("version"):
-                versions["ZCU"] = firmware_version(record["zcu_ota"]["version"]) or record["zcu_ota"]["version"]
+            if record.get("zcu_ota", {}).get("applied"):
+                versions.update(firmware_versions)
 
             return {
                 **latest_payload,
