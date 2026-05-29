@@ -281,7 +281,6 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
       <div class="logo" id="logo-text">SMART VEHICLE</div>
       <div class="status-pills">
         <div class="net-pill"><div class="ndot" id="ndot"></div><span id="nlabel">인터넷</span></div>
-        <div class="net-pill"><div class="ndot" id="vcdot"></div><span id="vclabel">Vehicle Computer</span></div>
       </div>
     </div>
     <div class="hdr-center">
@@ -540,6 +539,7 @@ let pendingOtaData = null;
 let pendingOtaKey = null;
 let dismissedOtaKey = null;
 let aebAlarmVisible = false;
+let lastAebTriggerCount = null;
 let ws;
 let debugTermWs = null;
 let flashPollTimer = null;
@@ -664,10 +664,13 @@ function updateDash(d) {
     dismissBanner(false);
   }
 
-  if(d.aeb_triggered && !aebAlarmVisible) {
-    aebAlarmVisible = true;
-    triggerAEB();
-    setTimeout(()=>{ aebAlarmVisible = false; }, 4200);
+  const aebTriggerCount = Number(d.aeb_trigger_count || 0);
+  if(lastAebTriggerCount === null) {
+    lastAebTriggerCount = aebTriggerCount;
+    if(d.aeb_triggered && aebTriggerCount > 0) showAebAlert();
+  } else if(aebTriggerCount > lastAebTriggerCount) {
+    lastAebTriggerCount = aebTriggerCount;
+    showAebAlert();
   }
 }
 
@@ -767,8 +770,10 @@ function setInternet(state = {}) {
 
 function setVehicleLink(state = {}) {
   const status = state.status || 'disconnected';
-  setDotState(document.getElementById('vcdot'), status);
-  document.getElementById('vclabel').textContent = 'Vehicle Computer';
+  const dot = document.getElementById('vcdot');
+  const label = document.getElementById('vclabel');
+  if (dot) setDotState(dot, status);
+  if (label) label.textContent = 'Vehicle Computer';
 }
 
 function internetText(state = {}) {
@@ -1014,6 +1019,13 @@ function triggerAEB() {
   const el=document.getElementById('aebov');
   el.classList.remove('show');void el.offsetWidth;el.classList.add('show');
   setTimeout(()=>el.classList.remove('show'),4200);
+}
+
+function showAebAlert() {
+  if(aebAlarmVisible) return;
+  aebAlarmVisible = true;
+  triggerAEB();
+  setTimeout(()=>{ aebAlarmVisible = false; }, 4200);
 }
 
 /* ════════════════════════

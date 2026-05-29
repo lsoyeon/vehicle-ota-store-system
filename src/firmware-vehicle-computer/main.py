@@ -1322,6 +1322,8 @@ class VehicleStatus:
         self._vehicle_event_updated_at: str | None = None
         self._vehicle_event_name: str | None = None
         self._vehicle_event_count = 0
+        self._aeb_triggered_at: str | None = None
+        self._aeb_trigger_count = 0
 
     def apply_gear(self, gear: str) -> dict:
         if gear not in (GEAR_P, GEAR_D):
@@ -1364,6 +1366,26 @@ class VehicleStatus:
             self._vehicle_event_name = event_name
             self._vehicle_event_count += 1
 
+    def mark_aeb_trigger(self) -> None:
+        with self._lock:
+            now = utc_now()
+            self._vehicle_event_updated_at = now
+            self._vehicle_event_name = "aeb_trigger"
+            self._vehicle_event_count += 1
+            self._aeb_triggered_at = now
+            self._aeb_trigger_count += 1
+
+    def aeb_trigger_snapshot(self, active_seconds: float = 5.0) -> dict[str, Any]:
+        with self._lock:
+            age_seconds = seconds_since(self._aeb_triggered_at)
+            active = age_seconds is not None and age_seconds <= active_seconds
+            return {
+                "active": active,
+                "triggered_at": self._aeb_triggered_at,
+                "age_seconds": round(age_seconds, 3) if age_seconds is not None else None,
+                "count": self._aeb_trigger_count,
+            }
+
     def sensor_snapshot(self) -> dict:
         with self._lock:
             return {
@@ -1395,6 +1417,8 @@ class VehicleStatus:
                 "vehicle_event_updated_at": self._vehicle_event_updated_at,
                 "vehicle_event_name": self._vehicle_event_name,
                 "vehicle_event_count": self._vehicle_event_count,
+                "aeb_triggered_at": self._aeb_triggered_at,
+                "aeb_trigger_count": self._aeb_trigger_count,
                 "ui_theme": self._ui_theme,
                 "updated_at": self._updated_at,
                 "transition_count": self._transition_count,
@@ -1795,7 +1819,7 @@ def vehicle_event_worker(
                     message.service_id == AEB_SERVICE_ID
                     and message.method_id == AEB_TRIGGER_EVENT_ID
                 ):
-                    vehicle_status.mark_vehicle_event("aeb_trigger")
+                    vehicle_status.mark_aeb_trigger()
                     event_logger.info("AEB triggered event received")
                     vehicle_control.trigger_aeb()
                     continue
@@ -2102,15 +2126,109 @@ def api_server_worker(
                 "stale_seconds": VEHICLE_COMM_STALE_SECONDS,
             }
 
+        def store_feature_package_path(record: dict) -> Path | None:
+            raw_path = record.get("package", {}).get("path")
+            if not raw_path:
+                return None
+            path = Path(str(raw_path))
+            return path if path.is_absolute() else BASE_DIR / path
+
+        store_latest_version_cache: dict[str, dict[str, Any]] = {}
+        store_latest_version_cache_lock = threading.Lock()
+        store_latest_version_cache_seconds = float(os.getenv("VEHICLE_STORE_VERSION_CACHE_SECONDS", "60"))
+
+        def github_latest_feature_version(item: dict) -> dict:
+            try:
+                action = ota_manager.python_package_action(item)
+            except ValueError:
+                action = None
+
+            if not action or action.get("type") != "github_release_file":
+                latest_version = firmware_version(item.get("latest_version")) or str(item.get("latest_version") or "")
+                return {
+                    "latest_version": latest_version,
+                    "latest_version_source": "catalog",
+                    "latest_version_checked_at": None,
+                    "latest_version_error": None,
+                }
+
+            repo = str(action.get("release_repo") or item.get("release_repo") or "")
+            cache_key = f"{item['id']}:{repo}:{action.get('release_patch_filter', '')}"
+            now = time.time()
+            with store_latest_version_cache_lock:
+                cached = store_latest_version_cache.get(cache_key)
+            if cached and now - float(cached.get("cached_at", 0)) < store_latest_version_cache_seconds:
+                return dict(cached["payload"])
+
+            try:
+                release = ota_manager.fetch_latest_release(item, action)
+                release_tag = str(release.get("tag_name") or "")
+                latest_version = firmware_version(release_tag) or release_tag
+                payload = {
+                    "latest_version": latest_version,
+                    "latest_versions": {FEATURE_VERSION_TARGET: latest_version} if latest_version else {},
+                    "latest_version_source": "github",
+                    "latest_version_checked_at": utc_now(),
+                    "latest_version_error": None,
+                    "release_tag": release_tag,
+                    "release_url": release.get("html_url"),
+                    "repo": repo,
+                }
+            except Exception as exc:
+                fallback_version = firmware_version(item.get("latest_version")) or str(item.get("latest_version") or "")
+                payload = {
+                    "latest_version": fallback_version,
+                    "latest_versions": {FEATURE_VERSION_TARGET: fallback_version} if fallback_version else {},
+                    "latest_version_source": "catalog",
+                    "latest_version_checked_at": utc_now(),
+                    "latest_version_error": f"{type(exc).__name__}: {exc}",
+                    "repo": repo,
+                }
+
+            with store_latest_version_cache_lock:
+                store_latest_version_cache[cache_key] = {"cached_at": now, "payload": dict(payload)}
+            return payload
+
+        def store_item_version_payload(item: dict, record: dict, installed: bool) -> dict:
+            package_downloaded = bool(record.get("package", {}).get("downloaded"))
+            package_path = store_feature_package_path(record)
+            package_version = python_module_version(package_path)
+            recorded_version = firmware_version(record.get("version")) or str(record.get("version") or "")
+            latest_payload = github_latest_feature_version(item)
+            latest_version = str(latest_payload.get("latest_version") or "")
+
+            downloaded_version = None
+            if package_downloaded:
+                downloaded_version = package_version or recorded_version or None
+            installed_version = downloaded_version if installed else None
+            display_version = installed_version or downloaded_version or latest_version or "1.0.0"
+
+            versions = {}
+            if downloaded_version:
+                versions[FEATURE_VERSION_TARGET] = downloaded_version
+            if record.get("zcu_ota", {}).get("applied") and record.get("zcu_ota", {}).get("version"):
+                versions["ZCU"] = firmware_version(record["zcu_ota"]["version"]) or record["zcu_ota"]["version"]
+
+            return {
+                **latest_payload,
+                "version": display_version,
+                "versions": versions,
+                "latest_versions": latest_payload.get("latest_versions", {}),
+                "installed_version": installed_version,
+                "downloaded_version": downloaded_version,
+            }
+
         def store_items_payload() -> list[dict]:
             records = feature_state_store.load()["items"]
             items = []
             for item in STORE_CATALOG:
                 record = records[item["id"]]
                 installed = feature_state_store._is_record_installed(item, record)
+                version_payload = store_item_version_payload(item, record, installed)
                 items.append(
                     {
                         **item,
+                        **version_payload,
                         "purchased": record["purchased"],
                         "enabled": record["enabled"],
                         "downloaded": record["package"]["downloaded"],
@@ -2135,7 +2253,10 @@ def api_server_worker(
             payload["installed"] = feature_state_store.downloaded_ids()
             payload["active"] = active
             payload["versions"] = feature_state_store.versions()
-            payload["aeb_triggered"] = bool(control.get("aeb", {}).get("value", {}).get("alarm"))
+            aeb_alert = vehicle_status.aeb_trigger_snapshot()
+            payload["aeb_triggered"] = bool(aeb_alert["active"]) or bool(control.get("aeb", {}).get("value", {}).get("alarm"))
+            payload["aeb_triggered_at"] = aeb_alert["triggered_at"]
+            payload["aeb_trigger_count"] = aeb_alert["count"]
             board_versions = firmware_versions.snapshot()
             aeb_zcu = feature_state_store.feature_record("AEB")["zcu_ota"]
             if aeb_zcu.get("applied") and aeb_zcu.get("version"):
@@ -2232,7 +2353,7 @@ def api_server_worker(
         @app.get("/api/store/items")
         async def store_items() -> dict:
             heartbeat()
-            return {"items": store_items_payload()}
+            return {"items": await run_in_threadpool(store_items_payload)}
 
         @app.get("/api/store/purchases")
         async def store_purchases() -> dict:
@@ -2704,6 +2825,7 @@ def api_server_worker(
         @app.post("/api/aeb")
         async def aeb_alert() -> dict:
             heartbeat()
+            vehicle_status.mark_aeb_trigger()
             return {"ok": True, "control": vehicle_control.trigger_aeb()}
 
         @app.post("/api/features/toggle")
