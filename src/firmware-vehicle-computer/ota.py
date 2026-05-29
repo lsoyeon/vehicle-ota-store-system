@@ -640,12 +640,14 @@ class OtaManager:
         firmware_dir: Path | None = None,
         timeout_seconds: float = 10.0,
         flash_state_callback: Callable[[bool], None] | None = None,
+        flash_network_lock: Any | None = None,
     ) -> None:
         self.base_dir = base_dir
         self.downloaded_features_dir = downloaded_features_dir
         self.firmware_dir = firmware_dir or (base_dir / "firmware")
         self.timeout_seconds = timeout_seconds
         self._flash_state_callback = flash_state_callback
+        self._flash_network_lock = flash_network_lock
         self._flash_state_lock = threading.Lock()
         self._flash_state_depth = 0
         self._progress_lock = threading.Lock()
@@ -665,6 +667,7 @@ class OtaManager:
                 callback = self._flash_state_callback
         if callback is not None:
             callback(True)
+        time.sleep(0.2)
 
     def _leave_flash(self) -> None:
         callback = None
@@ -675,6 +678,10 @@ class OtaManager:
                 callback = self._flash_state_callback
         if callback is not None:
             callback(False)
+
+    def is_flashing(self) -> bool:
+        with self._flash_state_lock:
+            return self._flash_state_depth > 0
 
     def download_feature_package(
         self,
@@ -1125,8 +1132,12 @@ class OtaManager:
 
         doip_connection = None
         stage = "importing DoIP/UDS libraries"
+        network_lock_acquired = False
         try:
             self._enter_flash()
+            if self._flash_network_lock is not None:
+                self._flash_network_lock.acquire()
+                network_lock_acquired = True
             import doipclient
             import udsoncan
             import udsoncan.services
@@ -1227,6 +1238,8 @@ class OtaManager:
                     doip_connection.close()
                 except Exception:
                     pass
+            if network_lock_acquired and self._flash_network_lock is not None:
+                self._flash_network_lock.release()
             self._leave_flash()
 
     def flash_sensor_can_ota_via_doip(
@@ -1302,8 +1315,12 @@ class OtaManager:
             )
 
         stage = "connecting Sensor ECU OTA DoIP gateway"
+        network_lock_acquired = False
         try:
             self._enter_flash()
+            if self._flash_network_lock is not None:
+                self._flash_network_lock.acquire()
+                network_lock_acquired = True
             with socket.create_connection((ecu_ip, doip_port), timeout=request_timeout) as sock:
                 sock.settimeout(request_timeout)
                 set_progress("install", "flashing", percent_start, f"DoIP gateway connected: {ecu_ip}:{doip_port}")
@@ -1410,6 +1427,8 @@ class OtaManager:
         except Exception as exc:
             fail(f"Sensor ECU CAN OTA failed during {stage}: {type(exc).__name__}: {exc}")
         finally:
+            if network_lock_acquired and self._flash_network_lock is not None:
+                self._flash_network_lock.release()
             self._leave_flash()
 
     @staticmethod

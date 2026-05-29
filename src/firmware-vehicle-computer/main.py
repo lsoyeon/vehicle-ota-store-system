@@ -1851,6 +1851,7 @@ class PingReachabilityStatus:
         self._checked_at: str | None = None
         self._latency_ms: int | None = None
         self._error: str | None = None
+        self._suspended_reason: str | None = None
 
     def check_once(self) -> dict[str, Any]:
         if not self.enabled:
@@ -1859,6 +1860,9 @@ class PingReachabilityStatus:
                 self._checked_at = utc_now()
                 self._latency_ms = None
                 self._error = None
+                return self.snapshot()
+        with self._lock:
+            if self._suspended_reason is not None:
                 return self.snapshot()
 
         timeout_ms = max(1, int(self.timeout_seconds * 1000))
@@ -1901,7 +1905,13 @@ class PingReachabilityStatus:
                 "latency_ms": self._latency_ms,
                 "error": self._error,
                 "enabled": self.enabled,
+                "suspended": self._suspended_reason is not None,
+                "suspended_reason": self._suspended_reason,
             }
+
+    def set_suspended(self, reason: str | None) -> None:
+        with self._lock:
+            self._suspended_reason = reason
 
 
 def placeholder_worker(name: str, interval_seconds: float) -> ChildTarget:
@@ -2030,6 +2040,9 @@ def ota_update_worker(
         ota_logger.debug("ready")
         while not stop_event.is_set():
             heartbeat()
+            if feature_state_store.ota_manager.is_flashing():
+                stop_event.wait(interval_seconds)
+                continue
             try:
                 pending = feature_state_store.check_pending_zcu_updates()
                 count = len(pending.get("to_install", [])) + len(pending.get("to_update", []))
@@ -3360,6 +3373,8 @@ def build_supervisor() -> Supervisor:
         reason = "ZCU flashing" if active else None
         packet_sender.set_suspended(reason)
         firmware_versions.set_suspended(reason)
+        vehicle_link_ping.set_suspended(reason)
+        front_zcu_ping.set_suspended(reason)
 
     ota_manager = OtaManager(
         base_dir=BASE_DIR,
