@@ -24,7 +24,7 @@ from typing import Any, Callable, Literal
 
 from ethernet import build_someip_packet, parse_someip_packet, send_ethernet_message
 from ota import OtaManager
-from vehicle_control import GEAR_D, GEAR_P, VehicleControl
+from vehicle_control import FEATURE_IDS, GEAR_D, GEAR_P, VehicleControl
 
 
 HOST = os.getenv("VEHICLE_HOST", "192.168.10.1")
@@ -2689,19 +2689,17 @@ def api_server_worker(
         @app.post("/api/vehicle/control/lkas")
         async def set_lkas(body: FeatureToggleRequest) -> dict:
             heartbeat()
-            return {"ok": True, "control": vehicle_control.set_lkas_enabled(body.enabled)}
+            return {"ok": True, "control": vehicle_control.set_feature_enabled("LKAS", body.enabled)}
 
         @app.post("/api/vehicle/control/fvsa")
         async def set_fvsa(body: FeatureToggleRequest) -> dict:
             heartbeat()
-            return {"ok": True, "control": vehicle_control.set_fvsa_enabled(body.enabled)}
+            return {"ok": True, "control": vehicle_control.set_feature_enabled("FVSA", body.enabled)}
 
         @app.post("/api/vehicle/control/aeb")
         async def set_aeb(body: FeatureToggleRequest) -> dict:
             heartbeat()
-            if body.enabled and not feature_state_store.is_feature_installed("AEB"):
-                raise HTTPException(status_code=400, detail="AEB installation is not complete")
-            return {"ok": True, "control": vehicle_control.set_aeb_enabled(body.enabled)}
+            return {"ok": True, "control": vehicle_control.set_feature_enabled("AEB", body.enabled)}
 
         @app.post("/api/aeb")
         async def aeb_alert() -> dict:
@@ -2712,22 +2710,11 @@ def api_server_worker(
         async def toggle_feature(body: FeatureToggleByIdRequest) -> dict:
             heartbeat()
             feature_id = body.feature_id
-            if feature_id not in ("AEB", "LKAS", "FVSA"):
+            if feature_id not in FEATURE_IDS:
                 raise HTTPException(status_code=400, detail="toggle is only available for AEB/LKAS/FVSA")
 
             enabled = not feature_state_store.is_feature_enabled(feature_id)
-            if enabled and not feature_state_store.is_feature_installed(feature_id):
-                return {
-                    "success": True,
-                    "message": f"{feature_id} installation is not complete yet.",
-                    "control": vehicle_control.snapshot(),
-                }
-            if feature_id == "AEB":
-                control = vehicle_control.set_aeb_enabled(enabled)
-            elif feature_id == "LKAS":
-                control = vehicle_control.set_lkas_enabled(enabled)
-            else:
-                control = vehicle_control.set_fvsa_enabled(enabled)
+            control = vehicle_control.set_feature_enabled(feature_id, enabled)
             effective = feature_state_store.is_feature_enabled(feature_id)
             feature_state = control[feature_id.lower()]
             if enabled and (not feature_state["downloaded"] or not feature_state["applied"]):

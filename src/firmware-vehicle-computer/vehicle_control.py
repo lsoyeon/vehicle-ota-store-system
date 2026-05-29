@@ -80,6 +80,48 @@ class FeatureState:
 
 
 @dataclass(frozen=True)
+class FeatureRuntimeSpec:
+    feature_id: str
+    module_file: str
+    class_name: str
+    factory_kwargs: dict[str, Any]
+
+
+FEATURE_RUNTIME_SPECS = (
+    FeatureRuntimeSpec(
+        feature_id="LKAS",
+        module_file="LKAS.py",
+        class_name="LKASFeature",
+        factory_kwargs={
+            "max_angle": 20.0,
+            "angle_deadzone": 3.0,
+            "smooth_frames": 5,
+            "lane_smooth_frames": 10,
+            "speed_byte_threshold": 117,
+            "sensitivity": 2.5,
+        },
+    ),
+    FeatureRuntimeSpec(
+        feature_id="FVSA",
+        module_file="FVSA.py",
+        class_name="FVSAFeature",
+        factory_kwargs={
+            "stop_time_threshold": 2.0,
+            "distance_diff_threshold": 700.0,
+            "tof_smooth_frames": 5,
+        },
+    ),
+    FeatureRuntimeSpec(
+        feature_id="AEB",
+        module_file="AEB.py",
+        class_name="AEBFeature",
+        factory_kwargs={"alarm_seconds": 4.0},
+    ),
+)
+FEATURE_IDS = tuple(spec.feature_id for spec in FEATURE_RUNTIME_SPECS)
+
+
+@dataclass(frozen=True)
 class VehicleControlSnapshot:
     joystick: JoystickSignal
     lkas: FeatureState
@@ -578,39 +620,19 @@ class VehicleControl:
             axis_steer=joystick_axis_steer,
         )
         self._feature_state_store = feature_state_store
-        self._desired_enabled = {"LKAS": False, "FVSA": False, "AEB": False}
-        self._sync_desired_enabled_from_store()
         self._features_dir = Path(features_dir) if features_dir else Path(__file__).resolve().parent / "features"
+        self._features = {
+            spec.feature_id: DownloadedPythonFeature(
+                feature_id=spec.feature_id,
+                module_path=self._features_dir / spec.module_file,
+                class_name=spec.class_name,
+                factory_kwargs=dict(spec.factory_kwargs),
+            )
+            for spec in FEATURE_RUNTIME_SPECS
+        }
+        self._desired_enabled = {feature_id: False for feature_id in self._features}
+        self._sync_desired_enabled_from_store()
         self._reported_runtime_status: dict[str, tuple[bool, bool, str | None, str | None]] = {}
-        self._lkas = DownloadedPythonFeature(
-            feature_id="LKAS",
-            module_path=self._features_dir / "LKAS.py",
-            class_name="LKASFeature",
-            factory_kwargs={
-                "max_angle": 20.0,
-                "angle_deadzone": 3.0,
-                "smooth_frames": 5,
-                "lane_smooth_frames": 10,
-                "speed_byte_threshold": 117,
-                "sensitivity": 2.5,
-            },
-        )
-        self._fvsa = DownloadedPythonFeature(
-            feature_id="FVSA",
-            module_path=self._features_dir / "FVSA.py",
-            class_name="FVSAFeature",
-            factory_kwargs={
-                "stop_time_threshold": 2.0,
-                "distance_diff_threshold": 700.0,
-                "tof_smooth_frames": 5,
-            },
-        )
-        self._aeb = DownloadedPythonFeature(
-            feature_id="AEB",
-            module_path=self._features_dir / "AEB.py",
-            class_name="AEBFeature",
-            factory_kwargs={"alarm_seconds": 4.0},
-        )
         self._on_gear_change = on_gear_change
         self._sensor_provider = sensor_provider
         self._packet_sender = packet_sender
@@ -626,18 +648,9 @@ class VehicleControl:
         self._last_aeb_enabled_sent: bool | None = None
 
         neutral = JoystickSignal(False, GEAR_P, 0.0, 0.0, SPEED_CENTER_BYTE, STEER_CENTER_BYTE, "initial")
-        neutral_lkas = self._update_lkas(neutral)
-        neutral_aeb = self._update_aeb(neutral)
-        neutral_payload = self.build_control_payload(neutral, neutral_lkas)
-        self._snapshot = VehicleControlSnapshot(
-            joystick=neutral,
-            lkas=neutral_lkas,
-            fvsa=self._update_fvsa(neutral),
-            aeb=neutral_aeb,
-            control_payload_hex=neutral_payload.hex(" "),
-            control_packet_hex=self._build_someip_packet(neutral_payload).hex(" "),
-            updated_at=utc_now(),
-        )
+        neutral_states = self._update_features(neutral)
+        neutral_payload = self.build_control_payload(neutral, neutral_states["LKAS"])
+        self._snapshot = self._snapshot_from(neutral, neutral_states, neutral_payload)
 
     def _feature_context(self) -> dict[str, Any]:
         sensor_context = self._sensor_provider() if self._sensor_provider is not None else {}
@@ -677,7 +690,14 @@ class VehicleControl:
         self._desired_enabled[feature_id] = bool(enabled)
         logger.info("%s %s", feature_id, "enabled" if enabled else "disabled")
 
-    def _feature_can_run(self, feature: DownloadedPythonFeature) -> bool:
+    def _feature_runtime(self, feature_id: str) -> DownloadedPythonFeature:
+        try:
+            return self._features[feature_id]
+        except KeyError as exc:
+            raise ValueError(f"unknown feature: {feature_id}") from exc
+
+    def _feature_can_run(self, feature_id: str) -> bool:
+        feature = self._feature_runtime(feature_id)
         feature.refresh()
         self._report_runtime_status(feature)
         return feature.downloaded and feature.applied
@@ -696,18 +716,28 @@ class VehicleControl:
                 version=feature.version,
             )
 
-    def _update_lkas(self, joystick: JoystickSignal, context: dict[str, Any] | None = None) -> FeatureState:
-        enabled = self._feature_enabled("LKAS")
-        state = self._lkas.update(
+    def _update_feature(
+        self,
+        feature_id: str,
+        joystick: JoystickSignal,
+        context: dict[str, Any] | None = None,
+    ) -> FeatureState:
+        feature = self._feature_runtime(feature_id)
+        enabled = self._feature_enabled(feature_id)
+        state = feature.update(
             joystick,
             enabled=enabled,
             context=context if context is not None else self._feature_context(),
         )
-        self._report_runtime_status(self._lkas)
+        self._report_runtime_status(feature)
+
         if enabled and (not state.downloaded or not state.applied):
-            self._set_feature_enabled("LKAS", False)
+            self._set_feature_enabled(feature_id, False)
+            enabled = False
+
         if state.value.get("disable_requested"):
-            self._set_feature_enabled("LKAS", False)
+            self._set_feature_enabled(feature_id, False)
+            enabled = False
             state = FeatureState(
                 enabled=False,
                 mode=state.mode,
@@ -716,40 +746,32 @@ class VehicleControl:
                 applied=state.applied,
                 error=state.error,
             )
+
+        if feature_id == "AEB":
+            self._sync_aeb_enabled_command(enabled)
+
         return state
 
-    def _update_fvsa(self, joystick: JoystickSignal, context: dict[str, Any] | None = None) -> FeatureState:
-        enabled = self._feature_enabled("FVSA")
-        state = self._fvsa.update(
-            joystick,
-            enabled=enabled,
-            context=context if context is not None else self._feature_context(),
-        )
-        self._report_runtime_status(self._fvsa)
-        if enabled and (not state.downloaded or not state.applied):
-            self._set_feature_enabled("FVSA", False)
-        return state
+    def _update_features(
+        self,
+        joystick: JoystickSignal,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, FeatureState]:
+        feature_context = context if context is not None else self._feature_context()
+        return {
+            feature_id: self._update_feature(feature_id, joystick, feature_context)
+            for feature_id in self._features
+        }
 
-    def _update_aeb(self, joystick: JoystickSignal, context: dict[str, Any] | None = None) -> FeatureState:
-        enabled = self._feature_enabled("AEB")
-        state = self._aeb.update(
-            joystick,
-            enabled=enabled,
-            context=context if context is not None else self._feature_context(),
-        )
-        self._report_runtime_status(self._aeb)
-        if enabled and (not state.downloaded or not state.applied):
-            self._set_feature_enabled("AEB", False)
-            enabled = False
+    def _sync_aeb_enabled_command(self, enabled: bool) -> None:
         if self._last_aeb_enabled_sent is None:
             self._last_aeb_enabled_sent = enabled
             if enabled:
                 self._send_aeb_enabled(enabled)
-            return state
+            return
         if self._last_aeb_enabled_sent != enabled:
             self._send_aeb_enabled(enabled)
             self._last_aeb_enabled_sent = enabled
-        return state
 
     def poll_once(self) -> VehicleControlSnapshot:
         joystick = self._joystick.read()
@@ -760,110 +782,77 @@ class VehicleControl:
                     self._on_gear_change(joystick.gear)
 
             feature_context = self._feature_context()
-            lkas = self._update_lkas(joystick, feature_context)
-            fvsa = self._update_fvsa(joystick, feature_context)
-            aeb = self._update_aeb(joystick, feature_context)
-            control_payload, control_packet = self._build_next_control_packet(joystick, lkas)
-            self._snapshot = VehicleControlSnapshot(
-                joystick=joystick,
-                lkas=lkas,
-                fvsa=fvsa,
-                aeb=aeb,
-                control_payload_hex=control_payload.hex(" "),
-                control_packet_hex=control_packet.hex(" "),
-                updated_at=utc_now(),
-            )
+            feature_states = self._update_features(joystick, feature_context)
+            control_payload, control_packet = self._build_next_control_packet(joystick, feature_states["LKAS"])
+            self._snapshot = self._snapshot_from(joystick, feature_states, control_payload, control_packet)
             return self._snapshot
 
-    def set_lkas_enabled(self, enabled: bool) -> dict:
+    def set_feature_enabled(self, feature_id: str, enabled: bool) -> dict:
         with self._lock:
-            if enabled and not self._feature_can_run(self._lkas):
+            if enabled and not self._feature_can_run(feature_id):
                 enabled = False
-            self._set_feature_enabled("LKAS", enabled)
-            lkas = self._update_lkas(self._snapshot.joystick)
-            control_payload = self.build_control_payload(self._snapshot.joystick, lkas)
-            self._snapshot = VehicleControlSnapshot(
-                joystick=self._snapshot.joystick,
-                lkas=lkas,
-                fvsa=self._snapshot.fvsa,
-                aeb=self._snapshot.aeb,
-                control_payload_hex=control_payload.hex(" "),
-                control_packet_hex=self._build_someip_packet(control_payload).hex(" "),
-                updated_at=utc_now(),
-            )
+            self._set_feature_enabled(feature_id, enabled)
+            feature_states = self._update_features(self._snapshot.joystick)
+            control_payload = self.build_control_payload(self._snapshot.joystick, feature_states["LKAS"])
+            self._snapshot = self._snapshot_from(self._snapshot.joystick, feature_states, control_payload)
             return self.snapshot()
 
+    def set_lkas_enabled(self, enabled: bool) -> dict:
+        return self.set_feature_enabled("LKAS", enabled)
+
     def set_fvsa_enabled(self, enabled: bool) -> dict:
-        with self._lock:
-            if enabled and not self._feature_can_run(self._fvsa):
-                enabled = False
-            self._set_feature_enabled("FVSA", enabled)
-            self._snapshot = VehicleControlSnapshot(
-                joystick=self._snapshot.joystick,
-                lkas=self._snapshot.lkas,
-                fvsa=self._update_fvsa(self._snapshot.joystick),
-                aeb=self._snapshot.aeb,
-                control_payload_hex=self._snapshot.control_payload_hex,
-                control_packet_hex=self._snapshot.control_packet_hex,
-                updated_at=utc_now(),
-            )
-            return self.snapshot()
+        return self.set_feature_enabled("FVSA", enabled)
 
     def trigger_fvsa_buzzer(self) -> dict:
         with self._lock:
-            if not self._feature_can_run(self._fvsa) or self._fvsa.instance is None:
+            fvsa = self._feature_runtime("FVSA")
+            if not self._feature_can_run("FVSA") or fvsa.instance is None:
                 return {"ok": False, "control": self.snapshot(), "message": "FVSA is not applied"}
 
-            if hasattr(self._fvsa.instance, "ring_buzzer"):
-                self._fvsa.instance.ring_buzzer()
-            elif hasattr(self._fvsa.instance, "_beep"):
-                self._fvsa.instance._beep()
+            if hasattr(fvsa.instance, "ring_buzzer"):
+                fvsa.instance.ring_buzzer()
+            elif hasattr(fvsa.instance, "_beep"):
+                fvsa.instance._beep()
             else:
                 return {"ok": False, "control": self.snapshot(), "message": "FVSA buzzer hook is unavailable"}
 
-            self._snapshot = VehicleControlSnapshot(
-                joystick=self._snapshot.joystick,
-                lkas=self._snapshot.lkas,
-                fvsa=self._update_fvsa(self._snapshot.joystick),
-                aeb=self._snapshot.aeb,
-                control_payload_hex=self._snapshot.control_payload_hex,
-                control_packet_hex=self._snapshot.control_packet_hex,
-                updated_at=utc_now(),
-            )
+            feature_states = self._update_features(self._snapshot.joystick)
+            control_payload = self.build_control_payload(self._snapshot.joystick, feature_states["LKAS"])
+            self._snapshot = self._snapshot_from(self._snapshot.joystick, feature_states, control_payload)
             return {"ok": True, "control": self.snapshot(), "message": "FVSA buzzer triggered"}
 
     def set_aeb_enabled(self, enabled: bool) -> dict:
-        with self._lock:
-            if enabled and not self._feature_can_run(self._aeb):
-                enabled = False
-            self._set_feature_enabled("AEB", enabled)
-            self._snapshot = VehicleControlSnapshot(
-                joystick=self._snapshot.joystick,
-                lkas=self._snapshot.lkas,
-                fvsa=self._snapshot.fvsa,
-                aeb=self._update_aeb(self._snapshot.joystick),
-                control_payload_hex=self._snapshot.control_payload_hex,
-                control_packet_hex=self._snapshot.control_packet_hex,
-                updated_at=utc_now(),
-            )
-            return self.snapshot()
+        return self.set_feature_enabled("AEB", enabled)
 
     def trigger_aeb(self) -> dict:
         with self._lock:
-            if not self._feature_can_run(self._aeb) or not self._feature_enabled("AEB"):
+            aeb = self._feature_runtime("AEB")
+            if not self._feature_can_run("AEB") or not self._feature_enabled("AEB"):
                 return self.snapshot()
-            if self._aeb.instance is not None and hasattr(self._aeb.instance, "trigger"):
-                self._aeb.instance.trigger()
-            self._snapshot = VehicleControlSnapshot(
-                joystick=self._snapshot.joystick,
-                lkas=self._snapshot.lkas,
-                fvsa=self._snapshot.fvsa,
-                aeb=self._update_aeb(self._snapshot.joystick),
-                control_payload_hex=self._snapshot.control_payload_hex,
-                control_packet_hex=self._snapshot.control_packet_hex,
-                updated_at=utc_now(),
-            )
+            if aeb.instance is not None and hasattr(aeb.instance, "trigger"):
+                aeb.instance.trigger()
+            feature_states = self._update_features(self._snapshot.joystick)
+            control_payload = self.build_control_payload(self._snapshot.joystick, feature_states["LKAS"])
+            self._snapshot = self._snapshot_from(self._snapshot.joystick, feature_states, control_payload)
             return self.snapshot()
+
+    def _snapshot_from(
+        self,
+        joystick: JoystickSignal,
+        feature_states: dict[str, FeatureState],
+        control_payload: bytes,
+        control_packet: bytes | None = None,
+    ) -> VehicleControlSnapshot:
+        packet = control_packet if control_packet is not None else self._build_someip_packet(control_payload)
+        return VehicleControlSnapshot(
+            joystick=joystick,
+            lkas=feature_states["LKAS"],
+            fvsa=feature_states["FVSA"],
+            aeb=feature_states["AEB"],
+            control_payload_hex=control_payload.hex(" "),
+            control_packet_hex=packet.hex(" "),
+            updated_at=utc_now(),
+        )
 
     def control_packet(self) -> bytes:
         with self._lock:
