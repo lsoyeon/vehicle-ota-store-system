@@ -773,6 +773,7 @@ function vehicleLinkText(state = {}) {
   if (state.status === 'connected') {
     if (state.source === 'event' && state.last_event) return `수신 · ${state.last_event}`;
     if (state.source === 'firmware' && state.last_version_target) return `응답 · ${state.last_version_target}`;
+    if (state.source === 'ping') return `ping · ${state.ping_target || 'OK'}`;
     return '연결';
   }
   if (state.status === 'transmitting') return '송신 중 · 응답 대기';

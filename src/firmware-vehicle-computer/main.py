@@ -63,6 +63,10 @@ VEHICLE_TX_PROTOCOL = os.getenv("VEHICLE_TX_PROTOCOL", "udp").lower()
 VEHICLE_TX_HOST = os.getenv("VEHICLE_TX_HOST", DEFAULT_VEHICLE_TX_HOST)
 VEHICLE_TX_PORT = int(os.getenv("VEHICLE_TX_PORT", str(DEFAULT_VEHICLE_TX_PORT)))
 VEHICLE_TX_TIMEOUT_SECONDS = float(os.getenv("VEHICLE_TX_TIMEOUT_SECONDS", "0.05"))
+VEHICLE_LINK_PING_ENABLED = os.getenv("VEHICLE_LINK_PING_ENABLED", "1") != "0"
+VEHICLE_LINK_PING_HOST = os.getenv("VEHICLE_LINK_PING_HOST", VEHICLE_TX_HOST)
+VEHICLE_LINK_PING_TIMEOUT_SECONDS = float(os.getenv("VEHICLE_LINK_PING_TIMEOUT_SECONDS", "0.75"))
+VEHICLE_LINK_PING_INTERVAL_SECONDS = float(os.getenv("VEHICLE_LINK_PING_INTERVAL_SECONDS", "2"))
 VEHICLE_EVENT_HOST = os.getenv("VEHICLE_EVENT_HOST", "0.0.0.0")
 VEHICLE_EVENT_PORT = int(os.getenv("VEHICLE_EVENT_PORT", str(DEFAULT_VEHICLE_EVENT_PORT)))
 OTA_POLL_INTERVAL_SECONDS = float(os.getenv("VEHICLE_OTA_POLL_INTERVAL_SECONDS", "300"))
@@ -1616,6 +1620,75 @@ class InternetConnectivityStatus:
             }
 
 
+class PingReachabilityStatus:
+    def __init__(
+        self,
+        *,
+        host: str,
+        timeout_seconds: float,
+        enabled: bool = True,
+    ) -> None:
+        self.host = host
+        self.timeout_seconds = timeout_seconds
+        self.enabled = enabled
+        self._lock = threading.RLock()
+        self._status = "checking" if enabled else "disabled"
+        self._checked_at: str | None = None
+        self._latency_ms: int | None = None
+        self._error: str | None = None
+
+    def check_once(self) -> dict[str, Any]:
+        if not self.enabled:
+            with self._lock:
+                self._status = "disabled"
+                self._checked_at = utc_now()
+                self._latency_ms = None
+                self._error = None
+                return self.snapshot()
+
+        timeout_ms = max(1, int(self.timeout_seconds * 1000))
+        if os.name == "nt":
+            command = ["ping", "-n", "1", "-w", str(timeout_ms), self.host]
+        else:
+            command = ["ping", "-c", "1", "-W", str(max(1, int(self.timeout_seconds))), self.host]
+
+        started = time.monotonic()
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds + 0.5,
+            )
+            latency_ms = int((time.monotonic() - started) * 1000)
+            status = "connected" if completed.returncode == 0 else "disconnected"
+            error = None if completed.returncode == 0 else (completed.stderr or completed.stdout).strip()
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            latency_ms = None
+            status = "disconnected"
+            error = str(exc)
+
+        with self._lock:
+            self._status = status
+            self._checked_at = utc_now()
+            self._latency_ms = latency_ms if status == "connected" else None
+            self._error = error
+            return self.snapshot()
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "status": self._status,
+                "connected": self._status == "connected",
+                "target": self.host,
+                "host": self.host,
+                "checked_at": self._checked_at,
+                "latency_ms": self._latency_ms,
+                "error": self._error,
+                "enabled": self.enabled,
+            }
+
+
 def placeholder_worker(name: str, interval_seconds: float) -> ChildTarget:
     def run(stop_event: threading.Event, heartbeat: HeartbeatCallback) -> None:
         worker_logger = logging.getLogger(f"vehicle-computer.{name}")
@@ -1647,6 +1720,29 @@ def internet_connectivity_worker(
                 )
             stop_event.wait(interval_seconds)
         net_logger.debug("stop requested")
+
+    return run
+
+
+def vehicle_link_ping_worker(
+    ping_status: PingReachabilityStatus,
+    interval_seconds: float,
+) -> ChildTarget:
+    def run(stop_event: threading.Event, heartbeat: HeartbeatCallback) -> None:
+        ping_logger = logging.getLogger("vehicle-computer.vehicle-link-ping")
+        ping_logger.debug("ready")
+        while not stop_event.is_set():
+            heartbeat()
+            before = ping_status.snapshot().get("status")
+            result = ping_status.check_once()
+            if result.get("status") != before:
+                ping_logger.info(
+                    "vehicle link ping %s via %s",
+                    result.get("status"),
+                    result.get("target"),
+                )
+            stop_event.wait(interval_seconds)
+        ping_logger.debug("stop requested")
 
     return run
 
@@ -1834,6 +1930,7 @@ def api_server_worker(
     vehicle_control: VehicleControl,
     packet_sender: VehiclePacketSender,
     internet_status: InternetConnectivityStatus,
+    vehicle_link_ping: PingReachabilityStatus,
     feature_state_store: FeatureStateStore,
     ota_manager: OtaManager,
     host: str,
@@ -1954,6 +2051,7 @@ def api_server_worker(
         def vehicle_computer_connection_payload() -> dict[str, Any]:
             event_status = vehicle_status.vehicle_event_snapshot(VEHICLE_COMM_STALE_SECONDS)
             firmware_status = firmware_versions.communication_snapshot(VEHICLE_COMM_STALE_SECONDS)
+            ping_status = vehicle_link_ping.snapshot()
             sender_status = packet_sender.to_dict()
             tx_age_seconds = seconds_since(sender_status.get("last_sent_at"))
             tx_recent = (
@@ -1963,9 +2061,15 @@ def api_server_worker(
                 and tx_age_seconds <= VEHICLE_COMM_STALE_SECONDS
                 and not sender_status.get("last_error")
             )
-            connected = bool(event_status["connected"] or firmware_status["connected"])
+            ping_connected = bool(ping_status.get("connected"))
+            connected = bool(event_status["connected"] or firmware_status["connected"] or ping_connected)
             if connected:
-                source = "event" if event_status["connected"] else "firmware"
+                if event_status["connected"]:
+                    source = "event"
+                elif firmware_status["connected"]:
+                    source = "firmware"
+                else:
+                    source = "ping"
                 status = "connected"
             elif tx_recent:
                 source = "tx"
@@ -1984,6 +2088,12 @@ def api_server_worker(
                 "last_version_target": firmware_status["last_success_target"],
                 "last_version_at": firmware_status["last_success_at"],
                 "last_version_age_seconds": firmware_status["last_success_age_seconds"],
+                "ping_connected": ping_connected,
+                "ping_target": ping_status.get("target"),
+                "ping_checked_at": ping_status.get("checked_at"),
+                "ping_latency_ms": ping_status.get("latency_ms"),
+                "ping_error": ping_status.get("error"),
+                "ping_enabled": ping_status.get("enabled"),
                 "tx_enabled": bool(sender_status.get("enabled")),
                 "tx_target": f"{sender_status.get('host')}:{sender_status.get('port')}",
                 "tx_recent": tx_recent,
@@ -2671,6 +2781,11 @@ def build_supervisor() -> Supervisor:
         port=INTERNET_CHECK_PORT,
         timeout_seconds=INTERNET_CHECK_TIMEOUT_SECONDS,
     )
+    vehicle_link_ping = PingReachabilityStatus(
+        host=VEHICLE_LINK_PING_HOST,
+        timeout_seconds=VEHICLE_LINK_PING_TIMEOUT_SECONDS,
+        enabled=VEHICLE_LINK_PING_ENABLED,
+    )
 
     def set_flash_active(active: bool) -> None:
         reason = "ZCU flashing" if active else None
@@ -2714,6 +2829,7 @@ def build_supervisor() -> Supervisor:
                 vehicle_control,
                 packet_sender,
                 internet_status,
+                vehicle_link_ping,
                 feature_state_store,
                 ota_manager,
                 HOST,
@@ -2726,6 +2842,12 @@ def build_supervisor() -> Supervisor:
         ChildService(
             "internet-connectivity",
             internet_connectivity_worker(internet_status, INTERNET_CHECK_INTERVAL_SECONDS),
+        )
+    )
+    supervisor.register(
+        ChildService(
+            "vehicle-link-ping",
+            vehicle_link_ping_worker(vehicle_link_ping, VEHICLE_LINK_PING_INTERVAL_SECONDS),
         )
     )
     supervisor.register(
