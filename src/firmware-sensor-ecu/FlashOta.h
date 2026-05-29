@@ -75,6 +75,40 @@
 /* ============================================================
    Debug status
    ============================================================ */
+/* ── OTA Pending Flag / Metadata ───────────────────────────── */
+
+#ifndef OTA_FLAG_MAGIC
+#define OTA_FLAG_MAGIC                  0xDEADBEEFUL
+#endif
+
+#define FLASH_OTA_META_VERSION          0x00000001UL
+#define FLASH_OTA_META_MAX_SEGMENTS     8U
+#define FLASH_OTA_META_GAP_FILL_ZERO    0x00U
+
+typedef struct
+{
+    uint32 offset;
+    uint32 size;
+    uint32 crc32;
+    uint32 reserved;
+} FlashOtaSegmentMeta_t;
+
+typedef struct
+{
+    uint32 magic;
+    uint32 version;
+
+    uint32 virtualSize;
+    uint32 gapFill;
+
+    uint32 expectedCrc32;
+    uint32 segmentCount;
+
+    uint32 reserved0;
+    uint32 reserved1;
+
+    FlashOtaSegmentMeta_t segments[FLASH_OTA_META_MAX_SEGMENTS];
+} FlashOtaPendingMeta_t;
 
 typedef struct
 {
@@ -121,5 +155,9 @@ void FlashOta_Service(void);
 boolean FlashOta_IsFlagWritePending(void);
 boolean FlashOta_IsResetPending(void);
 boolean FlashOta_RequestWritePendingFlag(void);
+boolean FlashOta_SetFinalFirmwareSize(uint32_t firmwareSize);
+
+boolean FlashOta_SetPendingMetadata(const FlashOtaPendingMeta_t *meta);
+boolean FlashOta_IsJumpPending(void);
 
 #endif /* FLASH_OTA_H_ */

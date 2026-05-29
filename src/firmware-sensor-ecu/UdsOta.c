@@ -8,9 +8,18 @@
  *  - Download / TransferData / TransferExit / RoutineControl / Reset 상태 관리
  *
  * 현재 수정 방향:
- *  - RequestDownload(0x34)에서 client가 보낸 memoryAddress는 직접 신뢰하지 않는다.
- *  - 현재 단독 검증 단계에서는 Slot A에서 실행 중이라고 가정하고 Slot B(0x80320000)에 write한다.
- *  - 최종 통합 시에는 SOTA_IsGroupBActive() 결과에 따라 targetAddress를 선택한다.
+ *  - RequestDownload(0x34)에서 client가 보낸 memoryAddress는 AppBase 기준 segment offset으로 사용한다.
+ *  - 실제 write 주소 = inactiveSlotBase + requestedOffset
+ *  - 여러 segment를 순차적으로 받을 수 있도록 0x37 이후 다시 0x34를 허용한다.
+ *  - 전체 sparse image의 virtual size를 segment end 기준으로 누적 관리한다.
+ *  - 0x31 최종 CRC 시점에 segment metadata를 FlashOta로 넘긴다.
+ *
+ * Sparse metadata:
+ *  - segmentCount
+ *  - segment offset / size
+ *  - virtualSize
+ *  - gapFill = 0x00
+ *  - expectedCrc32
  *
  * Cleanup 개선 내용:
  *  - 새 Programming Session(0x10 02) 진입 시 이전 OTA 완료/오류 context 정리
@@ -25,6 +34,7 @@
 #include "SotaUcb.h"
 
 #include <string.h>
+#include <stdint.h>
 
 /* ============================================================
    Internal state
@@ -32,6 +42,40 @@
 
 static UdsOta_DebugInfo_t g_udsOtaDebug;
 static boolean g_programmingAllowed = TRUE;
+
+/*
+ * Sparse / Segment OTA용 package virtual size.
+ *
+ * 예:
+ *   segment1 offset=0x00000000, size=0x000097C0
+ *      end = 0x000097C0
+ *
+ *   segment2 offset=0x002DE020, size=0x00000140
+ *      end = 0x002DE160
+ *
+ * 최종:
+ *   g_otaPackageVirtualSize = 0x002DE160
+ */
+static uint32_t g_otaPackageVirtualSize = 0U;
+
+/*
+ * Bootloader metadata용 segment list.
+ * 0x34 RequestDownload가 들어올 때마다 offset/size를 누적한다.
+ */
+static FlashOtaSegmentMeta_t g_otaSegmentList[FLASH_OTA_META_MAX_SEGMENTS];
+static uint32_t g_otaSegmentCount = 0U;
+
+/*
+ * 현재 sparse gap은 실제 Flash에서 읽지 않고 0x00으로 CRC에 반영한다.
+ */
+static uint32_t g_otaGapFill = FLASH_OTA_META_GAP_FILL_ZERO;
+
+/* Watch 확인용 debug 변수 */
+volatile uint32_t g_dbgOtaPackageVirtualSize = 0U;
+volatile uint32_t g_dbgOtaLastSegmentOffset = 0U;
+volatile uint32_t g_dbgOtaLastSegmentSize = 0U;
+volatile uint32_t g_dbgOtaLastSegmentEnd = 0U;
+volatile uint32_t g_dbgOtaSegmentCount = 0U;
 
 /* ============================================================
    Private prototypes
@@ -47,6 +91,7 @@ static void writeU32Le(uint8_t *p, uint32_t value);
 
 static boolean isDownloadActiveState(void);
 static void resetDownloadContextOnly(void);
+static void resetPackageMetadata(void);
 
 static void handleDiagnosticSessionControl(const uint8_t *payload, uint8_t length);
 static void handleRequestDownload(const uint8_t *payload, uint8_t length);
@@ -57,7 +102,6 @@ static void handleEcuReset(const uint8_t *payload, uint8_t length);
 
 /*
  * Target hook
- * 나중에 팀원이 구현한 Flash/CRC/Jump 함수로 이 함수 내부만 교체하면 됨.
  */
 static boolean Target_BeginDownload(uint32_t memoryAddress, uint32_t memorySize);
 static boolean Target_WriteBlock(uint32_t blockIndex, const uint8_t *data, uint16_t length);
@@ -65,6 +109,7 @@ static boolean Target_RequestTransferExit(void);
 static boolean Target_CheckCrc32(uint32_t expectedCrc32, uint32_t *calculatedCrc32);
 static boolean Target_EcuReset(uint8_t resetType);
 static boolean Target_PrepareActivation(void);
+
 static uint32_t selectInactiveSlotAddress(void)
 {
     if (Sota_IsGroupBActive() == TRUE)
@@ -81,10 +126,6 @@ static uint32_t selectInactiveSlotAddress(void)
 
 void UdsOta_init(void)
 {
-    /*
-     * FlashOta_Init()은 내부적으로 FlashOta_Reset()을 수행한다.
-     * 이후 UdsOta_reset()에서 UDS 상태도 초기화한다.
-     */
     FlashOta_Init();
     UdsOta_reset();
 
@@ -100,6 +141,8 @@ void UdsOta_reset(void)
 
     g_udsOtaDebug.expectedBlockIndex = 0U;
     g_udsOtaDebug.expectedBlockSequenceCounter = 0x01U;
+
+    resetPackageMetadata();
 
     /*
      * UDS OTA 전체 리셋 시 FlashOta 내부 상태도 같이 정리한다.
@@ -293,6 +336,21 @@ static boolean isDownloadActiveState(void)
     return active;
 }
 
+static void resetPackageMetadata(void)
+{
+    memset(g_otaSegmentList, 0, sizeof(g_otaSegmentList));
+
+    g_otaSegmentCount = 0U;
+    g_otaPackageVirtualSize = 0U;
+    g_otaGapFill = FLASH_OTA_META_GAP_FILL_ZERO;
+
+    g_dbgOtaPackageVirtualSize = 0U;
+    g_dbgOtaLastSegmentOffset = 0U;
+    g_dbgOtaLastSegmentSize = 0U;
+    g_dbgOtaLastSegmentEnd = 0U;
+    g_dbgOtaSegmentCount = 0U;
+}
+
 static void resetDownloadContextOnly(void)
 {
     /*
@@ -302,6 +360,8 @@ static void resetDownloadContextOnly(void)
      *  - requestCount, diagnosticSessionCount 같은 누적 카운터는 유지한다.
      *  - 실제 PFLASH erase는 여기서 하지 않는다.
      *  - FlashOta_Reset()은 FlashOta 내부 상태/debug만 초기화한다.
+     *  - sparse package metadata는 여기서 초기화하지 않는다.
+     *    segment1 이후 segment2를 받을 때 packageVirtualSize와 segment list가 유지되어야 하기 때문이다.
      */
     g_udsOtaDebug.firmwareSize = 0U;
     g_udsOtaDebug.receivedBytes = 0U;
@@ -353,10 +413,6 @@ static void handleDiagnosticSessionControl(const uint8_t *payload, uint8_t lengt
         return;
     }
 
-    /*
-     * 다운로드 도중 새 programming session 요청이 들어오면
-     * 전송 중인 OTA context를 깨뜨릴 수 있으므로 거절한다.
-     */
     if (isDownloadActiveState() == TRUE)
     {
         sendNegativeResponse(UDS_SID_DIAGNOSTIC_SESSION_CONTROL,
@@ -364,11 +420,8 @@ static void handleDiagnosticSessionControl(const uint8_t *payload, uint8_t lengt
         return;
     }
 
-    /*
-     * 이전 OTA가 CRC_VERIFIED / ERROR / RESET_REQUESTED 등에 남아 있어도
-     * 새 programming session 진입 시 다음 다운로드가 가능하도록 정리한다.
-     */
     resetDownloadContextOnly();
+    resetPackageMetadata();
 
     g_udsOtaDebug.state = UDS_OTA_STATE_PROGRAMMING_SESSION;
 
@@ -381,9 +434,11 @@ static void handleDiagnosticSessionControl(const uint8_t *payload, uint8_t lengt
 
 static void handleRequestDownload(const uint8_t *payload, uint8_t length)
 {
-    uint32_t requestedMemoryAddress;
+    uint32_t requestedOffset;
+    uint32_t inactiveSlotBase;
     uint32_t targetMemoryAddress;
     uint32_t memorySize;
+    uint32_t segmentEndOffset;
     uint8_t responsePayload[3];
 
     g_udsOtaDebug.requestDownloadCount++;
@@ -393,26 +448,10 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
      * B0      0x34
      * B1      DataFormatIdentifier = 0x00
      * B2      AddressAndLengthFormatIdentifier = 0x44
-     * B3~B6   MemoryAddress, little endian
-     * B7~B10  MemorySize, little endian
-     *
-     * 현재 팀 구조:
-     *  - client가 보내는 MemoryAddress는 직접 신뢰하지 않는다.
-     *  - ECU 내부에서 현재 active group 기준으로 inactive slot을 선택한다.
-     *
-     * 현재 단독 검증 단계:
-     *  - Slot A에서 실행 중이라고 가정
-     *  - target = Slot B(0x80320000)
-     *
-     * 최종 통합 시:
-     *  - if (SOTA_IsGroupBActive()) target = Slot A(0x80020000)
-     *  - else                       target = Slot B(0x80320000)
+     * B3~B6   SegmentOffset from AppBase, little endian
+     * B7~B10  SegmentSize, little endian
      */
 
-    /*
-     * 진행 중인 다운로드가 있는데 새 RequestDownload가 들어오면 거절한다.
-     * 완료/오류 상태는 0x10 programming session에서 cleanup 후 들어오는 것을 원칙으로 한다.
-     */
     if (isDownloadActiveState() == TRUE)
     {
         sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
@@ -420,7 +459,8 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
         return;
     }
 
-    if (g_udsOtaDebug.state != UDS_OTA_STATE_PROGRAMMING_SESSION)
+    if ((g_udsOtaDebug.state != UDS_OTA_STATE_PROGRAMMING_SESSION) &&
+        (g_udsOtaDebug.state != UDS_OTA_STATE_TRANSFER_EXIT_DONE))
     {
         sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
                              UDS_NRC_CONDITIONS_NOT_CORRECT);
@@ -442,40 +482,42 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
         return;
     }
 
-    requestedMemoryAddress = readU32Le(&payload[3]);
+    requestedOffset = readU32Le(&payload[3]);
     memorySize = readU32Le(&payload[7]);
 
-    /*
-     * 현재는 client address를 사용하지 않는다.
-     * 단, 디버깅 시 확인 가능하도록 변수는 읽어둔다.
-     */
-    (void)requestedMemoryAddress;
-
-    /*
-        * targetMemoryAddress는 현재 active slot 기준으로 inactive slot 주소를 선택한다.
-     */
-    targetMemoryAddress = selectInactiveSlotAddress();
-
-    g_udsOtaDebug.memoryAddress = targetMemoryAddress;
-
-    if (Target_BeginDownload(targetMemoryAddress, memorySize) == FALSE)
-    {
-        sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
-                            UDS_NRC_GENERAL_PROGRAMMING_FAILURE);
-        return;
-    }
-    if ((memorySize == 0U) ||
-        (memorySize > UDS_OTA_MAX_IMAGE_SIZE))
+    if ((memorySize == 0U) || (memorySize > UDS_OTA_MAX_IMAGE_SIZE))
     {
         sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
                              UDS_NRC_REQUEST_OUT_OF_RANGE);
         return;
     }
 
-    /*
-     * 새 다운로드 시작 직전 이전 전송 context를 한 번 더 정리한다.
-     * 0x10에서 이미 정리했더라도 중복 호출되어도 문제 없다.
-     */
+    if (requestedOffset >= UDS_OTA_MAX_IMAGE_SIZE)
+    {
+        sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
+                             UDS_NRC_REQUEST_OUT_OF_RANGE);
+        return;
+    }
+
+    if (memorySize > (UDS_OTA_MAX_IMAGE_SIZE - requestedOffset))
+    {
+        sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
+                             UDS_NRC_REQUEST_OUT_OF_RANGE);
+        return;
+    }
+
+    if (g_otaSegmentCount >= FLASH_OTA_META_MAX_SEGMENTS)
+    {
+        sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
+                             UDS_NRC_REQUEST_OUT_OF_RANGE);
+        return;
+    }
+
+    segmentEndOffset = requestedOffset + memorySize;
+
+    inactiveSlotBase = selectInactiveSlotAddress();
+    targetMemoryAddress = inactiveSlotBase + requestedOffset;
+
     resetDownloadContextOnly();
 
     if (Target_BeginDownload(targetMemoryAddress, memorySize) == FALSE)
@@ -485,14 +527,40 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
         return;
     }
 
+    /*
+     * Target_BeginDownload()가 성공한 segment만 metadata에 반영한다.
+     */
+    g_otaSegmentList[g_otaSegmentCount].offset = requestedOffset;
+    g_otaSegmentList[g_otaSegmentCount].size = memorySize;
+    g_otaSegmentList[g_otaSegmentCount].crc32 = 0U;
+    g_otaSegmentList[g_otaSegmentCount].reserved = 0U;
+    g_otaSegmentCount++;
+
+    /*
+     * package virtual size는 가장 큰 segment end offset으로 누적한다.
+     */
+    if (segmentEndOffset > g_otaPackageVirtualSize)
+    {
+        g_otaPackageVirtualSize = segmentEndOffset;
+    }
+
+    g_dbgOtaLastSegmentOffset = requestedOffset;
+    g_dbgOtaLastSegmentSize = memorySize;
+    g_dbgOtaLastSegmentEnd = segmentEndOffset;
+    g_dbgOtaPackageVirtualSize = g_otaPackageVirtualSize;
+    g_dbgOtaSegmentCount = g_otaSegmentCount;
+
     g_udsOtaDebug.state = UDS_OTA_STATE_DOWNLOAD_REQUESTED;
     g_udsOtaDebug.memoryAddress = targetMemoryAddress;
     g_udsOtaDebug.firmwareSize = memorySize;
     g_udsOtaDebug.receivedBytes = 0U;
+
     g_udsOtaDebug.expectedBlockIndex = 0U;
     g_udsOtaDebug.lastBlockIndex = 0U;
+
     g_udsOtaDebug.expectedBlockSequenceCounter = 0x01U;
     g_udsOtaDebug.lastBlockSequenceCounter = 0U;
+
     g_udsOtaDebug.expectedCrc32 = 0U;
     g_udsOtaDebug.calculatedCrc32 = 0U;
 
@@ -520,12 +588,6 @@ static void handleTransferData(const uint8_t *payload, uint8_t length)
 
     g_udsOtaDebug.transferDataCount++;
 
-    /*
-     * Simplified TransferData:
-     * B0    0x36
-     * B1    BlockSequenceCounter, 1 byte
-     * B2~   Firmware data
-     */
     if ((g_udsOtaDebug.state != UDS_OTA_STATE_DOWNLOAD_REQUESTED) &&
         (g_udsOtaDebug.state != UDS_OTA_STATE_TRANSFERRING))
     {
@@ -593,10 +655,6 @@ static void handleTransferData(const uint8_t *payload, uint8_t length)
     g_udsOtaDebug.expectedBlockIndex++;
     g_udsOtaDebug.expectedBlockSequenceCounter++;
 
-    /*
-     * uint8_t라 0xFF 다음 0x00으로 자연 wrap.
-     */
-
     responsePayload[0] = blockSequenceCounter;
 
     sendPositiveResponse(UDS_SID_TRANSFER_DATA,
@@ -606,6 +664,8 @@ static void handleTransferData(const uint8_t *payload, uint8_t length)
 
 static void handleRequestTransferExit(const uint8_t *payload, uint8_t length)
 {
+    uint8_t responsePayload[8];
+
     (void)payload;
 
     g_udsOtaDebug.requestTransferExitCount++;
@@ -634,9 +694,18 @@ static void handleRequestTransferExit(const uint8_t *payload, uint8_t length)
 
     g_udsOtaDebug.state = UDS_OTA_STATE_TRANSFER_EXIT_DONE;
 
+    /*
+     * Debug response for sparse OTA test.
+     * 0x77 response payload:
+     *   B1~B4: current package virtual size, little endian
+     *   B5~B8: last segment end offset, little endian
+     */
+    writeU32Le(&responsePayload[0], g_otaPackageVirtualSize);
+    writeU32Le(&responsePayload[4], g_dbgOtaLastSegmentEnd);
+
     sendPositiveResponse(UDS_SID_REQUEST_TRANSFER_EXIT,
-                         NULL_PTR,
-                         0U);
+                         responsePayload,
+                         8U);
 }
 
 static void handleRoutineControl(const uint8_t *payload, uint8_t length)
@@ -646,6 +715,8 @@ static void handleRoutineControl(const uint8_t *payload, uint8_t length)
     uint32_t expectedCrc32;
     uint32_t calculatedCrc32 = 0U;
     uint8_t responsePayload[7];
+    FlashOtaPendingMeta_t pendingMeta;
+    uint32_t i;
 
     g_udsOtaDebug.routineControlCount++;
 
@@ -681,11 +752,61 @@ static void handleRoutineControl(const uint8_t *payload, uint8_t length)
         return;
     }
 
+    if (g_otaPackageVirtualSize == 0U)
+    {
+        sendNegativeResponse(UDS_SID_ROUTINE_CONTROL,
+                             UDS_NRC_GENERAL_PROGRAMMING_FAILURE);
+        return;
+    }
+
+    if ((g_otaSegmentCount == 0U) || (g_otaSegmentCount > FLASH_OTA_META_MAX_SEGMENTS))
+    {
+        sendNegativeResponse(UDS_SID_ROUTINE_CONTROL,
+                             UDS_NRC_GENERAL_PROGRAMMING_FAILURE);
+        return;
+    }
+
+    /*
+     * FlashOta legacy fallback용 firmwareSize도 virtualSize로 맞춰둔다.
+     */
+    if (FlashOta_SetFinalFirmwareSize(g_otaPackageVirtualSize) == FALSE)
+    {
+        sendNegativeResponse(UDS_SID_ROUTINE_CONTROL,
+                             UDS_NRC_GENERAL_PROGRAMMING_FAILURE);
+        return;
+    }
+
     if (Target_CheckCrc32(expectedCrc32, &calculatedCrc32) == FALSE)
     {
         g_udsOtaDebug.expectedCrc32 = expectedCrc32;
         g_udsOtaDebug.calculatedCrc32 = calculatedCrc32;
 
+        sendNegativeResponse(UDS_SID_ROUTINE_CONTROL,
+                             UDS_NRC_GENERAL_PROGRAMMING_FAILURE);
+        return;
+    }
+
+    /*
+     * DFLASH pending metadata 구성.
+     * Bootloader가 이 metadata를 읽으면 hard-coded sparse CRC 대신
+     * metadata 기반 sparse CRC를 수행한다.
+     */
+    memset(&pendingMeta, 0, sizeof(pendingMeta));
+
+    pendingMeta.magic = OTA_FLAG_MAGIC;
+    pendingMeta.version = FLASH_OTA_META_VERSION;
+    pendingMeta.virtualSize = g_otaPackageVirtualSize;
+    pendingMeta.gapFill = g_otaGapFill;
+    pendingMeta.expectedCrc32 = expectedCrc32;
+    pendingMeta.segmentCount = g_otaSegmentCount;
+
+    for (i = 0U; i < g_otaSegmentCount; i++)
+    {
+        pendingMeta.segments[i] = g_otaSegmentList[i];
+    }
+
+    if (FlashOta_SetPendingMetadata(&pendingMeta) == FALSE)
+    {
         sendNegativeResponse(UDS_SID_ROUTINE_CONTROL,
                              UDS_NRC_GENERAL_PROGRAMMING_FAILURE);
         return;
@@ -750,22 +871,12 @@ static void handleEcuReset(const uint8_t *payload, uint8_t length)
 
     g_udsOtaDebug.state = UDS_OTA_STATE_RESET_REQUESTED;
 
-    /*
-     * 현재 단계에서는 실제 jump하지 않는다.
-     * FlashOta_RequestJumpToApp()도 pending만 세우고 직접 jump하지 않는다.
-     */
     (void)Target_EcuReset(resetType);
 }
 
 /* ============================================================
    Target hook functions
    ============================================================ */
-
-/*
- * 아래 함수들은 현재 CAN/UDS 계층 테스트용 placeholder.
- * Flash erase/write/CRC/jump 함수를 완성하면,
- * 여기 내부를 실제 함수 호출로 교체하면 된다.
- */
 
 static boolean Target_BeginDownload(uint32_t memoryAddress, uint32_t memorySize)
 {

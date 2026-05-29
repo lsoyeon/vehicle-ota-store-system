@@ -20,6 +20,10 @@
  *  - UDS RequestDownload 단계에서 현재 active group의 반대편 주소를 targetAddress로 넘긴다.
  *  - A active이면 targetAddress = 0x80320000
  *  - B active이면 targetAddress = 0x80020000
+ *
+ * Sparse OTA erase 정책:
+ *  - 첫 번째 segment, 즉 offsetInSlot == 0에서 inactive App slot 전체를 erase한다.
+ *  - sparse gap은 CAN으로 전송하지 않으므로, gap 상태를 일정하게 만들기 위함이다.
  *********************************************************************************************************************/
 
 #include "FlashOta.h"
@@ -34,7 +38,27 @@
 
 #include <string.h>
 #include <stdio.h>
-// debug
+
+/* ============================================================
+   DFLASH OTA flag / metadata address
+   ============================================================ */
+
+#ifndef OTA_FLAG_ADDR
+#define OTA_FLAG_ADDR       0xAF000000UL
+#endif
+
+#ifndef OTA_FLAG_MAGIC
+#define OTA_FLAG_MAGIC      0xDEADBEEFUL
+#endif
+
+#ifndef FLASH_MODULE
+#define FLASH_MODULE        0U
+#endif
+
+/* ============================================================
+   Debug
+   ============================================================ */
+
 typedef enum
 {
     FLASH_OTA_FAIL_NONE = 0,
@@ -78,6 +102,7 @@ typedef struct
     uint32_t eraseCount;
 
 } FlashOta_WriteDebug_t;
+
 volatile FlashOta_WriteDebug_t g_flashOtaWriteDebug;
 
 /* ============================================================
@@ -85,6 +110,7 @@ volatile FlashOta_WriteDebug_t g_flashOtaWriteDebug;
    ============================================================ */
 
 static FlashOta_DebugInfo_t g_flashOtaDebug;
+
 /*
  * 1: TransferData 중 32-byte page write 직후 byte-by-byte read-back verify 수행
  * 0: 즉시 verify 생략. 최종 CRC 검증에서 판단.
@@ -93,6 +119,7 @@ static FlashOta_DebugInfo_t g_flashOtaDebug;
  * 실제 write 결과와 다르게 보일 수 있으므로, 현재는 0 권장.
  */
 #define FLASH_OTA_ENABLE_WRITE_VERIFY   0U
+
 /*
  * 현재 단계에서는 이름은 유지하지만,
  * 실제 App jump 또는 UCB_SWAP은 수행하지 않는다.
@@ -103,7 +130,9 @@ static FlashOta_DebugInfo_t g_flashOtaDebug;
  */
 static volatile boolean g_flagWritePending = FALSE;
 static volatile boolean g_resetPending = FALSE;
+static volatile boolean g_pendingInfoWritten = FALSE;
 static volatile uint8_t g_pendingResetType = 0U;
+
 /*
  * 실제 erase / write / CRC 대상 주소.
  *
@@ -114,6 +143,15 @@ static uint32_t g_downloadTargetAddrC  = 0U;
 static uint32_t g_downloadTargetAddrNC = 0U;
 static uint32_t g_erasedUntilAddrNC = 0U;
 
+/*
+ * Sparse OTA metadata.
+ *
+ * UdsOta.c에서 0x31 처리 직전에 FlashOta_SetPendingMetadata()를 호출하면
+ * FlashOta_Service()가 기존 legacy flag 대신 metadata 전체를 DFLASH에 저장한다.
+ */
+static FlashOtaPendingMeta_t g_flashOtaPendingMeta;
+static boolean g_flashOtaUsePendingMeta = FALSE;
+
 /* ============================================================
    Private prototypes
    ============================================================ */
@@ -121,6 +159,12 @@ static uint32_t g_erasedUntilAddrNC = 0U;
 static void delayMs(uint32 ms);
 
 static IfxFlash_FlashType getPFlashTypeFromAddress(uint32 addr);
+
+static boolean FlashOta_WritePendingMetadataToDFlash(const FlashOtaPendingMeta_t *meta);
+static boolean FlashOta_WriteDFlash8(uint32 addr, uint32 lo, uint32 hi);
+
+static boolean FlashOta_EraseInactiveSlot(uint32_t slotStartAddrNc);
+static uint32_t FlashOta_AlignUpSector(uint32_t addr);
 
 /* ============================================================
    Public API
@@ -146,55 +190,177 @@ void FlashOta_Reset(void)
 
     g_flagWritePending = FALSE;
     g_resetPending = FALSE;
+    g_pendingInfoWritten = FALSE;
     g_pendingResetType = 0U;
+
+    memset(&g_flashOtaPendingMeta, 0, sizeof(g_flashOtaPendingMeta));
+    g_flashOtaUsePendingMeta = FALSE;
+}
+
+boolean FlashOta_SetPendingMetadata(const FlashOtaPendingMeta_t *meta)
+{
+    uint32 i;
+
+    if (meta == NULL_PTR)
+    {
+        return FALSE;
+    }
+
+    if (meta->magic != OTA_FLAG_MAGIC)
+    {
+        return FALSE;
+    }
+
+    if (meta->version != FLASH_OTA_META_VERSION)
+    {
+        return FALSE;
+    }
+
+    if ((meta->virtualSize == 0U) || (meta->virtualSize > FLASH_OTA_MAX_IMAGE_SIZE))
+    {
+        return FALSE;
+    }
+
+    if ((meta->segmentCount == 0U) || (meta->segmentCount > FLASH_OTA_META_MAX_SEGMENTS))
+    {
+        return FALSE;
+    }
+
+    if (meta->gapFill > 0xFFU)
+    {
+        return FALSE;
+    }
+
+    for (i = 0U; i < meta->segmentCount; i++)
+    {
+        uint32 segOffset;
+        uint32 segSize;
+        uint32 segEnd;
+
+        segOffset = meta->segments[i].offset;
+        segSize = meta->segments[i].size;
+        segEnd = segOffset + segSize;
+
+        if (segSize == 0U)
+        {
+            return FALSE;
+        }
+
+        if (segEnd < segOffset)
+        {
+            return FALSE;
+        }
+
+        if (segEnd > meta->virtualSize)
+        {
+            return FALSE;
+        }
+
+        if (i > 0U)
+        {
+            uint32 prevEnd;
+
+            prevEnd = meta->segments[i - 1U].offset + meta->segments[i - 1U].size;
+
+            if (segOffset < prevEnd)
+            {
+                return FALSE;
+            }
+        }
+    }
+
+    memcpy(&g_flashOtaPendingMeta, meta, sizeof(FlashOtaPendingMeta_t));
+    g_flashOtaUsePendingMeta = TRUE;
+
+    return TRUE;
 }
 
 boolean FlashOta_BeginDownload(uint32_t targetAddress, uint32_t firmwareSize)
 {
-    /*
-     * 새 다운로드 시작 시 FlashOta 내부 상태 초기화.
-     */
+    uint32_t offsetInSlot;
+    uint32_t slotStartAddrNC;
+
     FlashOta_Reset();
 
-    /*
-     * 최종 A/B OTA 구조:
-     *
-     *  - A active이면 Slot B(0x80320000)에 다운로드
-     *  - B active이면 Slot A(0x80020000)에 다운로드
-     *
-     * 따라서 targetAddress는 Slot A 또는 Slot B 시작 주소만 허용한다.
-     */
-    if ((targetAddress != FLASH_OTA_SLOT_A_START_ADDR_C) &&
-        (targetAddress != FLASH_OTA_SLOT_B_START_ADDR_C))
-    {
-        return FALSE;
-    }
+    slotStartAddrNC = 0U;
 
     if ((firmwareSize == 0U) || (firmwareSize > FLASH_OTA_MAX_IMAGE_SIZE))
     {
         return FALSE;
     }
 
-    /*
-     * 실제 download target 설정.
-     * Flash command는 non-cached 주소를 사용한다.
-     */
-    g_downloadTargetAddrC = targetAddress;
-
-    if (targetAddress == FLASH_OTA_SLOT_A_START_ADDR_C)
+    if ((targetAddress >= FLASH_OTA_SLOT_A_START_ADDR_C) &&
+        (targetAddress < (FLASH_OTA_SLOT_A_START_ADDR_C + FLASH_OTA_MAX_IMAGE_SIZE)))
     {
-        g_downloadTargetAddrNC = FLASH_OTA_SLOT_A_START_ADDR_NC;
+        offsetInSlot = targetAddress - FLASH_OTA_SLOT_A_START_ADDR_C;
+
+        if (firmwareSize > (FLASH_OTA_MAX_IMAGE_SIZE - offsetInSlot))
+        {
+            return FALSE;
+        }
+
+        g_downloadTargetAddrC = targetAddress;
+        g_downloadTargetAddrNC = FLASH_OTA_SLOT_A_START_ADDR_NC + offsetInSlot;
+        slotStartAddrNC = FLASH_OTA_SLOT_A_START_ADDR_NC;
+    }
+    else if ((targetAddress >= FLASH_OTA_SLOT_B_START_ADDR_C) &&
+             (targetAddress < (FLASH_OTA_SLOT_B_START_ADDR_C + FLASH_OTA_MAX_IMAGE_SIZE)))
+    {
+        offsetInSlot = targetAddress - FLASH_OTA_SLOT_B_START_ADDR_C;
+
+        if (firmwareSize > (FLASH_OTA_MAX_IMAGE_SIZE - offsetInSlot))
+        {
+            return FALSE;
+        }
+
+        g_downloadTargetAddrC = targetAddress;
+        g_downloadTargetAddrNC = FLASH_OTA_SLOT_B_START_ADDR_NC + offsetInSlot;
+        slotStartAddrNC = FLASH_OTA_SLOT_B_START_ADDR_NC;
     }
     else
     {
-        g_downloadTargetAddrNC = FLASH_OTA_SLOT_B_START_ADDR_NC;
+        return FALSE;
     }
 
     g_flashOtaDebug.targetAddress = g_downloadTargetAddrC;
     g_flashOtaDebug.firmwareSize = firmwareSize;
     g_flashOtaDebug.receivedBytes = 0U;
     g_flashOtaDebug.started = TRUE;
-    g_erasedUntilAddrNC = g_downloadTargetAddrNC & ~(FLASH_OTA_SECTOR_SIZE_BYTES - 1U);
+
+    /*
+     * 첫 번째 segment(offset 0)에서 inactive App slot 전체를 erase한다.
+     *
+     * Sparse OTA에서는 segment 사이 gap을 전송하지 않으므로,
+     * gap 상태를 항상 일정하게 만들어두는 목적이다.
+     *
+     * 주의:
+     *  - 이 erase는 시간이 오래 걸릴 수 있다.
+     *  - 0x34 응답 timeout을 충분히 길게 잡아야 한다.
+     */
+    if (offsetInSlot == 0U)
+    {
+        if (FlashOta_EraseInactiveSlot(slotStartAddrNC) == FALSE)
+        {
+            return FALSE;
+        }
+
+        /*
+         * 전체 slot을 이미 erase했으므로 이번 segment write 중
+         * on-demand erase를 다시 하지 않도록 erasedUntil을 slot 끝으로 둔다.
+         */
+        g_erasedUntilAddrNC = FlashOta_AlignUpSector(slotStartAddrNC + FLASH_OTA_MAX_IMAGE_SIZE);
+    }
+    else
+    {
+        /*
+         * segment2처럼 offset 0이 아닌 경우에는 기존처럼 해당 segment가 닿는 sector만
+         * on-demand erase한다.
+         *
+         * 단, 정상 흐름에서는 첫 segment 때 전체 slot erase가 이미 끝났으므로
+         * segment2의 해당 sector도 erase된 상태여야 한다.
+         */
+        g_erasedUntilAddrNC = g_downloadTargetAddrNC & ~(FLASH_OTA_SECTOR_SIZE_BYTES - 1U);
+    }
 
     return TRUE;
 }
@@ -412,11 +578,14 @@ boolean FlashOta_CheckCrc32(uint32_t expectedCrc32,
                             uint32_t *calculatedCrc32)
 {
     printf("FlashOta_CheckCrc32 transferExitDone : %d \r\n", g_flashOtaDebug.transferExitDone);
+
     if (g_flashOtaDebug.transferExitDone == FALSE)
     {
         return FALSE;
     }
-    printf("FlashOta_CheckCrc32 g_downloadTargetAddrNC : %d \r\n", g_downloadTargetAddrNC);
+
+    printf("FlashOta_CheckCrc32 g_downloadTargetAddrNC : 0x%08X \r\n", g_downloadTargetAddrNC);
+
     if (g_downloadTargetAddrNC == 0U)
     {
         return FALSE;
@@ -428,7 +597,9 @@ boolean FlashOta_CheckCrc32(uint32_t expectedCrc32,
      */
     g_flashOtaDebug.expectedCrc32 = expectedCrc32;
     g_flashOtaDebug.calculatedCrc32 = expectedCrc32;
-    printf("[FlashOta] Expected CRC32 : %x \r\n", expectedCrc32);
+
+    printf("[FlashOta] Expected CRC32 : %08X \r\n", expectedCrc32);
+
     if (calculatedCrc32 != NULL_PTR)
     {
         *calculatedCrc32 = expectedCrc32;
@@ -466,38 +637,115 @@ boolean FlashOta_RequestJumpToApp(uint8_t resetType)
     return TRUE;
 }
 
-boolean FlashOta_IsFlagWritePending(void){
+boolean FlashOta_IsFlagWritePending(void)
+{
     return g_flagWritePending;
 }
 
-boolean FlashOta_IsResetPending(void){
+boolean FlashOta_IsResetPending(void)
+{
+    return g_resetPending;
+}
+
+boolean FlashOta_IsJumpPending(void)
+{
     return g_resetPending;
 }
 
 void FlashOta_Service(void)
 {
+    /*
+     * 1) CRC RoutineControl 이후 pending flag write 요청 처리
+     *
+     * Legacy 단일 이미지 OTA에서는 여기서 기존 pending flag를 쓴다.
+     *
+     * Sparse metadata OTA에서는 여기서 DFLASH에 쓰지 않는다.
+     * Sparse metadata는 reset 요청 시점에 최종 1회 저장한다.
+     */
     if (g_flagWritePending == TRUE)
     {
         g_flagWritePending = FALSE;
 
-        Sota_SetPendingUpdateFlag(
-            g_flashOtaDebug.firmwareSize,
-            g_flashOtaDebug.expectedCrc32
-        );
+        if (g_flashOtaUsePendingMeta == FALSE)
+        {
+            if (g_pendingInfoWritten == FALSE)
+            {
+                Sota_SetPendingUpdateFlag(g_flashOtaDebug.firmwareSize,
+                                          g_flashOtaDebug.expectedCrc32);
 
-        printf("Pending update flag set.\r\n");
-        printf("Firmware size: %u, Expected CRC32: %08X\r\n",
-               g_flashOtaDebug.firmwareSize,
-               g_flashOtaDebug.expectedCrc32);
+                g_pendingInfoWritten = TRUE;
+
+                printf("Pending update flag set.\r\n");
+                printf("Firmware size: %u, Expected CRC32: %08X\r\n",
+                       g_flashOtaDebug.firmwareSize,
+                       g_flashOtaDebug.expectedCrc32);
+            }
+        }
+        else
+        {
+            /*
+             * Sparse OTA에서는 legacy flag를 먼저 쓰면 안 된다.
+             * metadata 저장은 reset 직전에 수행한다.
+             */
+            printf("[FlashOta] Sparse metadata mode: pending flag write deferred until reset.\r\n");
+        }
     }
 
+    /*
+     * 2) 최종 reset 처리
+     *
+     * 현재 Dual Slot / SOTA 구조에서는 App으로 직접 jump하지 않는다.
+     *
+     * 최종 흐름:
+     *  - legacy pending flag 또는 sparse metadata 저장
+     *  - system reset
+     *  - Bootloader가 DFLASH flag/metadata 확인
+     *  - inactive bank CRC 검증
+     *  - SOTA swap 수행
+     */
     if (g_resetPending == TRUE)
     {
         g_resetPending = FALSE;
 
-        delayMs(20U);
+        delayMs(200U);
+
         (void)g_pendingResetType;
+
+        if (g_pendingInfoWritten == FALSE)
+        {
+            if (g_flashOtaUsePendingMeta == TRUE)
+            {
+                if (FlashOta_WritePendingMetadataToDFlash(&g_flashOtaPendingMeta) == FALSE)
+                {
+                    printf("[FlashOta] Pending metadata write failed\r\n");
+
+                    g_pendingResetType = 0U;
+                    return;
+                }
+
+                printf("[FlashOta] Pending metadata set. virtualSize: %u, Expected CRC32: %08X, segmentCount: %u\r\n",
+                       g_flashOtaPendingMeta.virtualSize,
+                       g_flashOtaPendingMeta.expectedCrc32,
+                       g_flashOtaPendingMeta.segmentCount);
+            }
+            else
+            {
+                Sota_SetPendingUpdateFlag(g_flashOtaDebug.firmwareSize,
+                                          g_flashOtaDebug.expectedCrc32);
+
+                printf("Pending update flag set. Firmware size: %u, Expected CRC32: %08X\r\n",
+                       g_flashOtaDebug.firmwareSize,
+                       g_flashOtaDebug.expectedCrc32);
+            }
+
+            g_pendingInfoWritten = TRUE;
+        }
+
+        delayMs(20U);
+
         IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
+
+        g_pendingResetType = 0U;
     }
 }
 
@@ -552,3 +800,170 @@ static IfxFlash_FlashType getPFlashTypeFromAddress(uint32 addr)
     return IfxFlash_FlashType_P0;
 }
 
+static uint32_t FlashOta_AlignUpSector(uint32_t addr)
+{
+    return (addr + FLASH_OTA_SECTOR_SIZE_BYTES - 1U) &
+           ~(FLASH_OTA_SECTOR_SIZE_BYTES - 1U);
+}
+
+static boolean FlashOta_EraseInactiveSlot(uint32_t slotStartAddrNc)
+{
+    uint32_t eraseStartNc;
+    uint32_t eraseEndNc;
+    uint32_t addrNc;
+    IfxFlash_FlashType flashType;
+
+    eraseStartNc = slotStartAddrNc & ~(FLASH_OTA_SECTOR_SIZE_BYTES - 1U);
+    eraseEndNc = FlashOta_AlignUpSector(slotStartAddrNc + FLASH_OTA_MAX_IMAGE_SIZE);
+
+    printf("[FlashOta] Inactive slot erase start: 0x%08X ~ 0x%08X\r\n",
+           eraseStartNc,
+           eraseEndNc);
+
+    for (addrNc = eraseStartNc;
+         addrNc < eraseEndNc;
+         addrNc += FLASH_OTA_SECTOR_SIZE_BYTES)
+    {
+        flashType = getPFlashTypeFromAddress(addrNc);
+
+        if (SensorOtaFlash_Erase(addrNc,
+                                 FLASH_OTA_SECTOR_SIZE_BYTES,
+                                 flashType) == FALSE)
+        {
+            printf("[FlashOta] Inactive slot erase failed: addr=0x%08X\r\n",
+                   addrNc);
+
+            g_flashOtaWriteDebug.eraseAddressNc = addrNc;
+            g_flashOtaWriteDebug.flashType = (uint32_t)flashType;
+            g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
+            g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_ERASE;
+
+            return FALSE;
+        }
+
+        g_flashOtaWriteDebug.eraseCount++;
+        g_flashOtaDebug.eraseCount++;
+    }
+
+    printf("[FlashOta] Inactive slot erase done\r\n");
+
+    return TRUE;
+}
+
+static boolean FlashOta_WriteDFlash8(uint32 addr, uint32 lo, uint32 hi)
+{
+    uint16 pw;
+
+    pw = IfxScuWdt_getSafetyWatchdogPassword();
+
+    IfxFlash_enterPageMode(addr);
+    IfxFlash_waitUnbusy(FLASH_MODULE, IfxFlash_FlashType_D0);
+
+    IfxFlash_loadPage2X32(addr, lo, hi);
+
+    IfxScuWdt_clearSafetyEndinit(pw);
+    IfxFlash_writePage(addr);
+    IfxScuWdt_setSafetyEndinit(pw);
+
+    IfxFlash_waitUnbusy(FLASH_MODULE, IfxFlash_FlashType_D0);
+
+    if (MODULE_DMU.HF_ERRSR.U != 0U)
+    {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static boolean FlashOta_WritePendingMetadataToDFlash(const FlashOtaPendingMeta_t *meta)
+{
+    uint16 pw;
+    const uint32 *words;
+    uint32 wordCount;
+    uint32 i;
+    uint32 addr;
+
+    if (meta == NULL_PTR)
+    {
+        return FALSE;
+    }
+
+    if (meta->magic != OTA_FLAG_MAGIC)
+    {
+        return FALSE;
+    }
+
+    if (meta->version != FLASH_OTA_META_VERSION)
+    {
+        return FALSE;
+    }
+
+    if ((meta->virtualSize == 0U) || (meta->virtualSize > FLASH_OTA_MAX_IMAGE_SIZE))
+    {
+        return FALSE;
+    }
+
+    if ((meta->segmentCount == 0U) || (meta->segmentCount > FLASH_OTA_META_MAX_SEGMENTS))
+    {
+        return FALSE;
+    }
+
+    if (meta->gapFill > 0xFFU)
+    {
+        return FALSE;
+    }
+
+    /*
+     * DFLASH pending metadata sector erase.
+     */
+    pw = IfxScuWdt_getSafetyWatchdogPassword();
+
+    IfxScuWdt_clearSafetyEndinit(pw);
+    IfxFlash_eraseMultipleSectors(OTA_FLAG_ADDR, 1U);
+    IfxScuWdt_setSafetyEndinit(pw);
+
+    IfxFlash_waitUnbusy(FLASH_MODULE, IfxFlash_FlashType_D0);
+
+    if (MODULE_DMU.HF_ERRSR.U != 0U)
+    {
+        return FALSE;
+    }
+
+    /*
+     * FlashOtaPendingMeta_t는 uint32 필드만 가진다.
+     * 8-byte 단위로 DFLASH page write한다.
+     */
+    words = (const uint32 *)meta;
+    wordCount = (uint32)(sizeof(FlashOtaPendingMeta_t) / sizeof(uint32));
+
+    if ((wordCount & 1U) != 0U)
+    {
+        return FALSE;
+    }
+
+    addr = OTA_FLAG_ADDR;
+
+    for (i = 0U; i < wordCount; i += 2U)
+    {
+        if (FlashOta_WriteDFlash8(addr, words[i], words[i + 1U]) == FALSE)
+        {
+            return FALSE;
+        }
+
+        addr += 8U;
+    }
+
+    return TRUE;
+}
+
+boolean FlashOta_SetFinalFirmwareSize(uint32_t firmwareSize)
+{
+    if ((firmwareSize == 0U) || (firmwareSize > FLASH_OTA_MAX_IMAGE_SIZE))
+    {
+        return FALSE;
+    }
+
+    g_flashOtaDebug.firmwareSize = firmwareSize;
+
+    return TRUE;
+}
