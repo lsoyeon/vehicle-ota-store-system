@@ -441,6 +441,7 @@ class DownloadedPythonFeature:
     def refresh(self) -> bool:
         before = self.status_tuple()
         if not self.module_path.exists():
+            self._dispose_instance()
             self.instance = None
             self.downloaded = False
             self.applied = False
@@ -455,6 +456,7 @@ class DownloadedPythonFeature:
             return before != self.status_tuple()
 
         try:
+            self._dispose_instance()
             module_name = f"vehicle_feature_{self.feature_id.lower()}_{mtime_ns}"
             spec = importlib.util.spec_from_file_location(module_name, self.module_path)
             if spec is None or spec.loader is None:
@@ -477,6 +479,18 @@ class DownloadedPythonFeature:
             logger.exception("%s feature module failed to apply", self.feature_id)
 
         return before != self.status_tuple()
+
+    def _dispose_instance(self) -> None:
+        if self.instance is None:
+            return
+        for method_name in ("close", "shutdown", "stop"):
+            method = getattr(self.instance, method_name, None)
+            if callable(method):
+                try:
+                    method()
+                except Exception as exc:
+                    logger.warning("%s feature %s failed: %s", self.feature_id, method_name, exc)
+                break
 
     def update(
         self,
@@ -509,6 +523,7 @@ class DownloadedPythonFeature:
             if not isinstance(result, dict):
                 raise RuntimeError("feature update must return a dict")
         except Exception as exc:
+            self._dispose_instance()
             self.applied = False
             self.error = f"{type(exc).__name__}: {exc}"
             logger.exception("%s feature update failed", self.feature_id)
