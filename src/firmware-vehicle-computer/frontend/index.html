@@ -125,27 +125,31 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
 
 /* ══ 중앙: 속도 + 날씨 ══ */
 /* 1번: 창이 커지면 속도+날씨 커짐 */
-.speed-panel{padding:20px 18px;display:flex;flex-direction:column;align-items:center;box-shadow:var(--glow);flex-shrink:0}
-.gauge{position:relative;width:min(160px, 18vw);height:min(160px,18vw)}
+.speed-panel{padding:22px 20px;display:flex;flex-direction:column;align-items:center;justify-content:center;box-shadow:var(--glow);flex:1.35;min-height:0}
+.speed-layout{display:flex;align-items:center;justify-content:center;gap:20px;width:100%}
+.gauge{position:relative;width:min(220px, 22vw);height:min(220px,22vw)}
 .gauge svg{width:100%;height:100%}
 .arc-bg{fill:none;stroke:rgba(255,255,255,.06);stroke-width:7}
 .arc-fill{fill:none;stroke:var(--ac);stroke-width:7;stroke-linecap:round;stroke-dasharray:220;stroke-dashoffset:220;transition:stroke-dashoffset .7s ease}
 .gauge-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding-top:10px}
-.speed-readout{display:flex;align-items:center;justify-content:center;gap:7px;min-width:86px}
-.snum{font-family:var(--font-head);font-size:clamp(28px,5vw,40px);font-weight:800;color:var(--ac);line-height:1;min-width:2ch;text-align:center;transition:color .3s}
-.gearbadge{width:28px;height:28px;border-radius:8px;border:1px solid rgba(0,229,160,.32);background:rgba(0,229,160,.1);color:var(--ac2);display:flex;align-items:center;justify-content:center;font-family:var(--font-head);font-size:16px;font-weight:800;line-height:1}
+.snum{font-family:var(--font-head);font-size:clamp(34px,6vw,54px);font-weight:800;color:var(--ac);line-height:1;min-width:2ch;text-align:center;transition:color .3s}
+.gearbox{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;min-width:86px}
+.gearlabel{font-size:10px;color:var(--txs);font-weight:700;letter-spacing:1.5px}
+.gearbadge{width:66px;height:66px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);display:flex;align-items:center;justify-content:center;font-family:var(--font-head);font-size:36px;font-weight:800;line-height:1;transition:.25s}
+.gearbadge.gear-p{color:#ffcc66;border-color:rgba(255,204,102,.42);background:rgba(255,204,102,.12);box-shadow:0 0 18px rgba(255,204,102,.12)}
+.gearbadge.gear-d{color:var(--ac2);border-color:rgba(0,229,160,.42);background:rgba(0,229,160,.12);box-shadow:0 0 18px rgba(0,229,160,.14)}
 .sunit{font-size:9px;color:var(--txs);letter-spacing:2px}
 .dirbadge{margin-top:10px;padding:4px 16px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(0,200,255,.1);color:var(--ac);border:1px solid rgba(0,200,255,.22)}
 
 /* 날씨 */
-.wpanel{padding:14px 16px;flex:1;min-height:0}
-.wmain{display:flex;align-items:center;gap:12px;margin-bottom:10px}
-.wicon{font-size:clamp(32px,4vw,42px);filter:drop-shadow(0 0 10px rgba(0,200,255,.25));line-height:1}
-.wtemp{font-family:var(--font-head);font-size:clamp(22px,3.5vw,30px);font-weight:800}
+.wpanel{padding:10px 14px;flex:.65;min-height:0}
+.wmain{display:flex;align-items:center;gap:10px;margin-bottom:7px}
+.wicon{font-size:clamp(26px,3.2vw,34px);filter:drop-shadow(0 0 10px rgba(0,200,255,.25));line-height:1}
+.wtemp{font-family:var(--font-head);font-size:clamp(20px,3vw,26px);font-weight:800}
 .wunit{font-size:12px;color:var(--txs)}
-.wdesc{font-size:12px;color:var(--txs);margin-top:2px}
-.wgrid{display:grid;grid-template-columns:1fr 1fr;gap:5px}
-.wrow{font-size:10px;color:var(--txs);display:flex;align-items:center;gap:3px}
+.wdesc{font-size:11px;color:var(--txs);margin-top:1px}
+.wgrid{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+.wrow{font-size:9px;color:var(--txs);display:flex;align-items:center;gap:3px}
 .wrow span{color:var(--tx);font-weight:500}
 
 /* ══ 오른쪽: 시스템 상태 ══ */
@@ -314,18 +318,21 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
     <!-- 중앙: 속도 + 날씨 (flex grow, 창 커지면 커짐) -->
     <div class="ccol">
       <div class="panel speed-panel">
+        <div class="speed-layout">
         <div class="gauge">
           <svg viewBox="0 0 120 120">
             <path class="arc-bg" d="M18,92 A50,50 0 1,1 102,92"/>
             <path class="arc-fill" id="sarc" d="M18,92 A50,50 0 1,1 102,92"/>
           </svg>
           <div class="gauge-center">
-            <div class="speed-readout">
               <div class="snum" id="snum">0.0</div>
-              <div class="gearbadge" id="gearbadge">P</div>
-            </div>
             <div class="sunit">KM/H</div>
           </div>
+        </div>
+        <div class="gearbox">
+          <div class="gearlabel">GEAR</div>
+          <div class="gearbadge gear-p" id="gearbadge">P</div>
+        </div>
         </div>
         <div class="dirbadge" id="dirbadge">정지</div>
       </div>
@@ -622,12 +629,16 @@ function updateDash(d) {
 
   // 속도 (Orbitron 고정폭으로 레이아웃 안 튐)
   const spd = Number(d.speed || 0);
+  const gear = d.gear === 'D' ? 'D' : 'P';
+  const gearEl = document.getElementById('gearbadge');
   document.getElementById('snum').textContent = spd.toFixed(1);
-  document.getElementById('gearbadge').textContent = d.gear === 'D' ? 'D' : 'P';
+  gearEl.textContent = gear;
+  gearEl.classList.toggle('gear-d', gear === 'D');
+  gearEl.classList.toggle('gear-p', gear !== 'D');
   document.getElementById('dirbadge').textContent = d.direction || '정지';
   const arc = document.getElementById('sarc');
-  arc.style.strokeDashoffset = 220 * (1 - Math.min(spd/60,1));
-  arc.style.stroke = spd > 40 ? 'var(--warn)' : 'var(--ac)';
+  arc.style.strokeDashoffset = 220 * (1 - Math.min(spd/8,1));
+  arc.style.stroke = spd > 6 ? 'var(--warn)' : 'var(--ac)';
 
   // 네트워크
   const internet = d.network?.internet || {status: d.network?.status || 'checking'};
