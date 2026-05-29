@@ -225,24 +225,10 @@ STORE_CATALOG = [
         "release_repo": "HAMES-6th-Overdrive/firmware-front-zcu",
         "ota_actions": [
             {
-                "id": "zcu_firmware",
-                "type": "doip_uds_flash",
-                "target": "zcu",
-                "release_repo": "HAMES-6th-Overdrive/firmware-front-zcu",
-                "target_dir": "firmware",
-                "ecu_ip": "192.168.10.2",
-                "doip_port": 13400,
-                "tester_address": 3584,
-                "ecu_address": 1,
-                "bank_start": 0x80300000,
-                "timeout_seconds": 60,
-                "release_patch_filter": 1,
-            },
-            {
                 "id": "sensor_ecu_firmware",
                 "type": "doip_sensor_can_ota",
                 "target": "sensor-ecu",
-                "release_repo": os.getenv("AEB_SENSOR_ECU_OTA_REPO", "HAMES-6th-Overdrive/firmware-front-zcu"),
+                "release_repo": os.getenv("AEB_SENSOR_ECU_OTA_REPO", "HAMES-6th-Overdrive/sensor-ecu"),
                 "target_dir": "firmware",
                 "asset_name": os.getenv("AEB_SENSOR_ECU_OTA_ASSET", "sensor_ecu__slow_toggle.bin"),
                 "ecu_ip": os.getenv("AEB_SENSOR_ECU_OTA_ZCU_IP", "192.168.10.2"),
@@ -255,6 +241,20 @@ STORE_CATALOG = [
                 "block_delay_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS", "0.005")),
                 "activate_after_transfer": False,
                 "release_patch_filter": int(os.getenv("AEB_SENSOR_ECU_OTA_RELEASE_PATCH_FILTER", "1")),
+            },
+            {
+                "id": "zcu_firmware",
+                "type": "doip_uds_flash",
+                "target": "zcu",
+                "release_repo": "HAMES-6th-Overdrive/firmware-front-zcu",
+                "target_dir": "firmware",
+                "ecu_ip": "192.168.10.2",
+                "doip_port": 13400,
+                "tester_address": 3584,
+                "ecu_address": 1,
+                "bank_start": 0x80300000,
+                "timeout_seconds": 60,
+                "release_patch_filter": 1,
             },
         ],
     },
@@ -820,10 +820,16 @@ class FeatureStateStore:
     ) -> dict:
         feature_id = item["id"]
         target = action.get("target", "zcu")
+        target_name = {
+            "zcu": "ZCU",
+            "front-zcu": "Front ZCU",
+            "sensor-ecu": "Sensor ECU",
+            "drive-ecu": "Drive ECU",
+        }.get(str(target), str(target))
         if ota_kind == "initial_install":
-            full_name = f"{item.get('name', feature_id)} initial install"
+            full_name = f"{item.get('name', feature_id)} {target_name} initial install"
         elif update_scope == "firmware":
-            full_name = f"{item.get('name', feature_id)} ZCU firmware update"
+            full_name = f"{item.get('name', feature_id)} {target_name} firmware update"
         else:
             full_name = f"{item.get('name', feature_id)} feature update"
         return {
@@ -1298,7 +1304,7 @@ class FeatureStateStore:
                 zcu["checked_at"] = utc_now()
                 zcu["error"] = f"{type(exc).__name__}: {exc}"
                 firmware_failed = True
-                continue
+                break
 
             zcu["required"] = True
             zcu["downloaded"] = zcu_result.downloaded
@@ -1324,6 +1330,9 @@ class FeatureStateStore:
                 zcu["applied_at"] = utc_now() if zcu_result.applied else None
             zcu["error"] = zcu_result.error
             updated = updated or zcu_result.updated
+            if not zcu_result.applied:
+                firmware_failed = True
+                break
 
         if firmware_failed:
             record["zcu_ota"]["applied"] = False
