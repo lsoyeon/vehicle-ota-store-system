@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import html
+import os
 import re
 import shutil
 import socket
@@ -8,6 +10,7 @@ import struct
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 from dataclasses import dataclass
@@ -1317,18 +1320,31 @@ class OtaManager:
 
         if action.get("release_patch_filter") is not None:
             expected_patch = int(action["release_patch_filter"])
-            return self.fetch_highest_patch_release(
-                catalog_item,
-                action,
-                expected_patch=expected_patch,
-            )
+            try:
+                return self.fetch_highest_patch_release(
+                    catalog_item,
+                    action,
+                    expected_patch=expected_patch,
+                )
+            except RuntimeError as exc:
+                if "download failed (403)" not in str(exc):
+                    raise
+                return self.fetch_highest_patch_release_from_github_web(
+                    repo,
+                    expected_patch=expected_patch,
+                )
 
         url = f"https://api.github.com/repos/{repo}/releases/latest"
-        data = self._request_bytes(url, accept="application/vnd.github+json")
-        payload = json.loads(data.decode("utf-8"))
-        if not isinstance(payload, dict) or not payload.get("tag_name"):
-            raise RuntimeError(f"latest release payload is invalid: {repo}")
-        return payload
+        try:
+            data = self._request_bytes(url, accept="application/vnd.github+json")
+            payload = json.loads(data.decode("utf-8"))
+            if not isinstance(payload, dict) or not payload.get("tag_name"):
+                raise RuntimeError(f"latest release payload is invalid: {repo}")
+            return payload
+        except RuntimeError as exc:
+            if "download failed (403)" not in str(exc):
+                raise
+            return self.fetch_latest_release_from_github_web(repo)
 
     def fetch_highest_patch_release(
         self,
@@ -1362,6 +1378,81 @@ class OtaManager:
             raise RuntimeError(f"no x.x.{expected_patch} release found: {repo}")
         candidates.sort(key=lambda item: item[0], reverse=True)
         return candidates[0][1]
+
+    def fetch_latest_release_from_github_web(self, repo: str) -> dict[str, Any]:
+        _, final_url = self._request_text(f"https://github.com/{repo}/releases/latest")
+        tag = self._release_tag_from_url(final_url)
+        if not tag:
+            raise RuntimeError(f"latest release redirect is invalid: {repo}")
+        return self.fetch_github_web_release(repo, tag)
+
+    def fetch_highest_patch_release_from_github_web(
+        self,
+        repo: str,
+        *,
+        expected_patch: int,
+    ) -> dict[str, Any]:
+        text, _ = self._request_text(f"https://github.com/{repo}/releases")
+        tag_pattern = re.compile(
+            rf"/{re.escape(repo)}/releases/tag/([^\"?#<>]+)"
+        )
+        candidates: list[tuple[tuple[int, int, int], str]] = []
+        seen: set[str] = set()
+        for raw_tag in tag_pattern.findall(text):
+            tag = urllib.parse.unquote(html.unescape(raw_tag))
+            if tag in seen:
+                continue
+            seen.add(tag)
+            version = release_version_tuple(tag)
+            if version is None or version[2] != expected_patch:
+                continue
+            candidates.append((version, tag))
+
+        if not candidates:
+            raise RuntimeError(f"no x.x.{expected_patch} release found: {repo}")
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return self.fetch_github_web_release(repo, candidates[0][1])
+
+    def fetch_github_web_release(self, repo: str, tag: str) -> dict[str, Any]:
+        quoted_tag = urllib.parse.quote(tag, safe="")
+        assets_url = f"https://github.com/{repo}/releases/expanded_assets/{quoted_tag}"
+        text, _ = self._request_text(assets_url)
+        assets = self._github_web_assets(repo, text)
+        if not assets:
+            release_url = f"https://github.com/{repo}/releases/tag/{quoted_tag}"
+            text, _ = self._request_text(release_url)
+            assets = self._github_web_assets(repo, text)
+        return {
+            "tag_name": tag,
+            "html_url": f"https://github.com/{repo}/releases/tag/{quoted_tag}",
+            "assets": assets,
+        }
+
+    @staticmethod
+    def _release_tag_from_url(url: str) -> str | None:
+        path = urllib.parse.urlparse(url).path
+        marker = "/releases/tag/"
+        if marker not in path:
+            return None
+        return urllib.parse.unquote(path.split(marker, 1)[1].strip("/"))
+
+    @staticmethod
+    def _github_web_assets(repo: str, text: str) -> list[dict[str, Any]]:
+        href_pattern = re.compile(
+            rf"href=\"([^\"]*/{re.escape(repo)}/releases/download/[^\"]+)\""
+        )
+        assets: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw_href in href_pattern.findall(text):
+            href = html.unescape(raw_href)
+            url = urllib.parse.urljoin("https://github.com", href)
+            path = urllib.parse.unquote(urllib.parse.urlparse(url).path)
+            name = path.rsplit("/", 1)[-1]
+            if not name or url in seen:
+                continue
+            seen.add(url)
+            assets.append({"name": name, "browser_download_url": url})
+        return assets
 
     def download_release_asset(
         self,
@@ -1411,14 +1502,7 @@ class OtaManager:
         accept: str = "application/octet-stream",
         progress: dict[str, Any] | None = None,
     ) -> bytes:
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Accept": accept,
-                "User-Agent": "vehicle-computer-ota",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
+        request = urllib.request.Request(url, headers=self._request_headers(accept))
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 total_header = response.headers.get("Content-Length")
@@ -1479,6 +1563,33 @@ class OtaManager:
             raise RuntimeError(f"download failed ({exc.code}): {url}") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"download failed: {url}: {exc.reason}") from exc
+
+    def _request_text(self, url: str) -> tuple[str, str]:
+        request = urllib.request.Request(
+            url,
+            headers=self._request_headers("text/html,application/xhtml+xml"),
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                raw = response.read()
+                content_type = response.headers.get_content_charset() or "utf-8"
+                return raw.decode(content_type, errors="replace"), response.geturl()
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"download failed ({exc.code}): {url}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"download failed: {url}: {exc.reason}") from exc
+
+    @staticmethod
+    def _request_headers(accept: str) -> dict[str, str]:
+        headers = {
+            "Accept": accept,
+            "User-Agent": "vehicle-computer-ota",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
 
     def download_zcu_payload(self, catalog_item: dict[str, Any]) -> OtaPackageResult:
         return self.run_action(catalog_item, self.zcu_flash_action(catalog_item), force=False)
