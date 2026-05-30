@@ -100,7 +100,6 @@ typedef enum
     APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_ERROR
 } AppSensorOtaGatewayUds_AsyncState_t;
 
-static uint8  g_session = APP_SENSOR_OTA_GATEWAY_UDS_SESSION_DEFAULT;
 
 static uint32 g_downloadSize = 0U;
 static uint32 g_receivedBytes = 0U;
@@ -262,6 +261,22 @@ void AppSensorOtaGatewayUds_Init(void)
     g_sensorOtaUdsAsyncBusyCount = 0U;
     g_sensorOtaUdsAsyncErrorCount = 0U;
 
+
+    g_sensorOtaUdsSparseManifestCount = 0U;
+    g_sensorOtaUdsSparseManifestOkCount = 0U;
+    g_sensorOtaUdsSparseManifestFailCount = 0U;
+    g_sensorOtaUdsSparsePayloadSize = 0U;
+    g_sensorOtaUdsSparseVirtualSize = 0U;
+    g_sensorOtaUdsSparseVirtualCrc32 = 0U;
+    g_sensorOtaUdsSparseSegmentCount = 0U;
+    g_sensorOtaUdsSparseGapFill = 0U;
+
+    g_dbgWaitNextFailBlockIndex = 0U;
+    g_dbgWaitNextFailReqIndex = 0U;
+    g_dbgWaitNextFailIsWaitingBlock = 0U;
+    g_dbgWaitNextFailIsWaitingFinalCrc = 0U;
+    g_dbgWaitNextFailIsError = 0U;
+
     taskENTER_CRITICAL();
     g_asyncState = APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_IDLE;
     g_asyncRxLen = 0U;
@@ -292,21 +307,6 @@ void AppSensorOtaGatewayUds_Init(void)
     }
 }
 
-    g_sensorOtaUdsSparseManifestCount = 0U;
-    g_sensorOtaUdsSparseManifestOkCount = 0U;
-    g_sensorOtaUdsSparseManifestFailCount = 0U;
-    g_sensorOtaUdsSparsePayloadSize = 0U;
-    g_sensorOtaUdsSparseVirtualSize = 0U;
-    g_sensorOtaUdsSparseVirtualCrc32 = 0U;
-    g_sensorOtaUdsSparseSegmentCount = 0U;
-    g_sensorOtaUdsSparseGapFill = 0U;
-
-    g_dbgWaitNextFailBlockIndex = 0U;
-    g_dbgWaitNextFailReqIndex = 0U;
-    g_dbgWaitNextFailIsWaitingBlock = 0U;
-    g_dbgWaitNextFailIsWaitingFinalCrc = 0U;
-    g_dbgWaitNextFailIsError = 0U;
-}
 
 void AppSensorOtaGatewayUds_Task(void)
 {
@@ -1277,6 +1277,8 @@ static boolean validateSparseManifest(const UdsOtaClient_SparseManifest_t *manif
     *totalPayloadSize = total;
 
     return TRUE;
+}
+
 
 static void AppSensorOtaGatewayUds_WorkerTask(void *arg)
 {
