@@ -73,6 +73,7 @@ OTA_RESET_TRIGGER_PROTOCOL = os.getenv("VEHICLE_OTA_RESET_TRIGGER_PROTOCOL", "ud
 OTA_RESET_TRIGGER_HOST = os.getenv("VEHICLE_OTA_RESET_TRIGGER_HOST", VEHICLE_TX_HOST)
 OTA_RESET_TRIGGER_PORT = int(os.getenv("VEHICLE_OTA_RESET_TRIGGER_PORT", str(VEHICLE_TX_PORT)))
 OTA_RESET_TRIGGER_TIMEOUT_SECONDS = float(os.getenv("VEHICLE_OTA_RESET_TRIGGER_TIMEOUT_SECONDS", "0.1"))
+OTA_RESET_TRIGGER_GAP_SECONDS = float(os.getenv("VEHICLE_OTA_RESET_TRIGGER_GAP_SECONDS", "0.05"))
 VEHICLE_LINK_PING_ENABLED = os.getenv("VEHICLE_LINK_PING_ENABLED", "1") != "0"
 VEHICLE_LINK_PING_HOST = os.getenv("VEHICLE_LINK_PING_HOST", VEHICLE_TX_HOST)
 VEHICLE_LINK_PING_TIMEOUT_SECONDS = float(os.getenv("VEHICLE_LINK_PING_TIMEOUT_SECONDS", "0.75"))
@@ -330,6 +331,11 @@ STORE_CATALOG = [
 
 STORE_ITEM_IDS = {item["id"] for item in STORE_CATALOG}
 AUTO_STORE_OTA_FEATURE_IDS = {"AEB"}
+OTA_RESET_TARGET_ORDER = ("sensor-ecu", "drive-ecu", "front-zcu")
+OTA_RESET_TARGET_PRIORITY = {
+    target: index
+    for index, target in enumerate(OTA_RESET_TARGET_ORDER)
+}
 
 
 HeartbeatCallback = Callable[[], None]
@@ -2726,7 +2732,10 @@ def api_server_worker(
                         target = normalize_ota_reset_target(value)
                         if target and target not in targets:
                             targets.append(target)
-            return targets
+            return sorted(
+                targets,
+                key=lambda target: (OTA_RESET_TARGET_PRIORITY.get(target, len(OTA_RESET_TARGET_ORDER)), target),
+            )
 
         def send_ota_reset_triggers(pending: dict, apply_result: dict) -> dict:
             targets = ota_reset_targets_from_pending(pending, apply_result)
@@ -2734,10 +2743,11 @@ def api_server_worker(
                 return {"success": True, "enabled": OTA_RESET_TRIGGER_ENABLED, "triggers": []}
 
             triggers = []
-            for target in targets:
+            for index, target in enumerate(targets, start=1):
                 event = ota_reset_event_map[target]
                 payload = {
                     "target": target,
+                    "sequence": index,
                     "service_id": f"0x{OTA_RESET_SERVICE_ID:04X}",
                     "event_id": f"0x{event['event_id']:04X}",
                     "event_name": event["event_name"],
@@ -2781,6 +2791,10 @@ def api_server_worker(
                 except Exception as exc:
                     payload.update({"success": False, "error": f"{type(exc).__name__}: {exc}"})
                     logger.warning("OTA reset trigger failed for %s: %s", target, exc)
+
+                if OTA_RESET_TRIGGER_GAP_SECONDS > 0 and index < len(targets):
+                    payload["gap_after_seconds"] = OTA_RESET_TRIGGER_GAP_SECONDS
+                    time.sleep(OTA_RESET_TRIGGER_GAP_SECONDS)
 
                 triggers.append(payload)
 
