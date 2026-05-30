@@ -47,7 +47,7 @@
 
 McmcanType g_mcmcan;
 
-#define CAN_TX_STUCK_LIMIT_1MS   20U
+#define CAN_TX_STUCK_LIMIT_1MS   1U
 
 static volatile uint32_t g_txInProgressTicks = 0U;
 
