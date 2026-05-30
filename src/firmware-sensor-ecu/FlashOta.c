@@ -104,6 +104,17 @@ static FlashOta_DebugInfo_t g_flashOtaDebug;
 static volatile boolean g_flagWritePending = FALSE;
 static volatile boolean g_resetPending = FALSE;
 static volatile uint8_t g_pendingResetType = 0U;
+
+#define FLASH_OTA_BURST_WRITE_SIZE      SENSOR_OTA_PFLASH_BURST_LEN
+#define FLASH_OTA_BURST_WRITE_MASK      (FLASH_OTA_BURST_WRITE_SIZE - 1U)
+
+static uint32_t g_burstWriteBuffer[FLASH_OTA_BURST_WRITE_SIZE / 4U];
+static boolean g_burstWriteActive = FALSE;
+static uint32_t g_burstWriteStartOffset = 0U;
+static uint16_t g_burstWritePayloadBytes = 0U;
+static uint16_t g_burstWriteBufferedBytes = 0U;
+static uint32_t g_acceptedBytes = 0U;
+
 /*
  * 실제 erase / write / CRC 대상 주소.
  *
@@ -121,6 +132,7 @@ static uint32_t g_erasedUntilAddrNC = 0U;
 static void delayMs(uint32 ms);
 
 static IfxFlash_FlashType getPFlashTypeFromAddress(uint32 addr);
+static boolean FlashOta_FlushBurstWriteBuffer(void);
 
 /* ============================================================
    Public API
@@ -143,6 +155,12 @@ void FlashOta_Reset(void)
     g_downloadTargetAddrC  = 0U;
     g_downloadTargetAddrNC = 0U;
     g_erasedUntilAddrNC = 0U;
+    memset(g_burstWriteBuffer, 0xFF, sizeof(g_burstWriteBuffer));
+    g_burstWriteActive = FALSE;
+    g_burstWriteStartOffset = 0U;
+    g_burstWritePayloadBytes = 0U;
+    g_burstWriteBufferedBytes = 0U;
+    g_acceptedBytes = 0U;
 
     g_flagWritePending = FALSE;
     g_resetPending = FALSE;
@@ -203,16 +221,9 @@ boolean FlashOta_WriteBlock(uint32_t blockIndex,
                             const uint8_t *data,
                             uint16_t length)
 {
-    uint8_t page[FLASH_OTA_PAGE_SIZE];
-    uint32_t targetAddrNc;
     uint32_t offset;
     uint32_t remaining;
-    uint32_t writeEndAddrNc;
-    IfxFlash_FlashType flashType;
-
-#if (FLASH_OTA_ENABLE_WRITE_VERIFY != 0U)
-    volatile const uint8 *readPtr;
-#endif
+    uint16_t copied = 0U;
 
     /*
      * 공통 debug 초기 기록
@@ -241,7 +252,7 @@ boolean FlashOta_WriteBlock(uint32_t blockIndex,
         return FALSE;
     }
 
-    if ((data == NULL_PTR) || (length == 0U) || (length > FLASH_OTA_PAGE_SIZE))
+    if ((data == NULL_PTR) || (length == 0U) || (length > FLASH_OTA_BURST_WRITE_SIZE))
     {
         g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_BAD_ARG;
         g_flashOtaWriteDebug.writeFailCount++;
@@ -257,7 +268,7 @@ boolean FlashOta_WriteBlock(uint32_t blockIndex,
         return FALSE;
     }
 
-    offset = ((uint32_t)blockIndex * FLASH_OTA_PAGE_SIZE);
+    offset = g_acceptedBytes;
     g_flashOtaWriteDebug.offset = offset;
 
     if (offset >= g_flashOtaDebug.firmwareSize)
@@ -279,114 +290,68 @@ boolean FlashOta_WriteBlock(uint32_t blockIndex,
         return FALSE;
     }
 
-    /*
-     * 마지막 block이 32바이트보다 작을 수 있으므로 나머지는 0xFF padding.
-     * CRC는 firmwareSize만큼만 계산하므로 padding은 CRC에 포함되지 않음.
-     */
-    memset(page, 0xFF, sizeof(page));
-    memcpy(page, data, length);
-
-    targetAddrNc = g_downloadTargetAddrNC + offset;
-    writeEndAddrNc = targetAddrNc + FLASH_OTA_PAGE_SIZE;
-
-    g_flashOtaWriteDebug.writeAddressNc = targetAddrNc;
-    g_flashOtaWriteDebug.writeEndAddressNc = writeEndAddrNc;
-
-    /*
-     * 필요한 sector를 on-demand erase.
-     */
-    while (writeEndAddrNc > g_erasedUntilAddrNC)
+    while (copied < length)
     {
-        flashType = getPFlashTypeFromAddress(g_erasedUntilAddrNC);
+        uint32_t currentOffset = offset + copied;
+        uint32_t burstStartOffset = currentOffset & ~FLASH_OTA_BURST_WRITE_MASK;
+        uint16_t bufferOffset = (uint16_t)(currentOffset - burstStartOffset);
+        uint16_t burstRemain = (uint16_t)(FLASH_OTA_BURST_WRITE_SIZE - bufferOffset);
+        uint16_t copyLength = (uint16_t)(length - copied);
+        uint16_t bufferedEnd;
 
-        g_flashOtaWriteDebug.eraseAddressNc = g_erasedUntilAddrNC;
-        g_flashOtaWriteDebug.erasedUntilNc = g_erasedUntilAddrNC;
-        g_flashOtaWriteDebug.flashType = (uint32_t)flashType;
-
-        if (SensorOtaFlash_Erase(g_erasedUntilAddrNC,
-                                 FLASH_OTA_SECTOR_SIZE_BYTES,
-                                 flashType) == FALSE)
+        if (copyLength > burstRemain)
         {
-            g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_ERASE;
-            g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
-            g_flashOtaWriteDebug.writeFailCount++;
+            copyLength = burstRemain;
+        }
 
+        if (g_burstWriteActive == FALSE)
+        {
+            memset(g_burstWriteBuffer, 0xFF, sizeof(g_burstWriteBuffer));
+            g_burstWriteActive = TRUE;
+            g_burstWriteStartOffset = burstStartOffset;
+            g_burstWritePayloadBytes = 0U;
+            g_burstWriteBufferedBytes = 0U;
+        }
+
+        if (g_burstWriteStartOffset != burstStartOffset)
+        {
+            g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_OFFSET_RANGE;
+            g_flashOtaWriteDebug.writeFailCount++;
             g_flashOtaDebug.writeFailCount++;
             return FALSE;
         }
 
-        g_erasedUntilAddrNC += FLASH_OTA_SECTOR_SIZE_BYTES;
+        memcpy(((uint8_t *)g_burstWriteBuffer) + bufferOffset,
+               &data[copied],
+               copyLength);
 
-        g_flashOtaWriteDebug.eraseCount++;
-        g_flashOtaWriteDebug.erasedUntilNc = g_erasedUntilAddrNC;
-
-        g_flashOtaDebug.eraseCount++;
-    }
-
-    /*
-     * Write 직전 주소 기록.
-     */
-    g_flashOtaDebug.lastWriteAddress = targetAddrNc;
-
-    flashType = getPFlashTypeFromAddress(targetAddrNc);
-    g_flashOtaWriteDebug.flashType = (uint32_t)flashType;
-
-    if (SensorOtaFlash_Write(targetAddrNc,
-                             page,
-                             FLASH_OTA_PAGE_SIZE,
-                             flashType) == FALSE)
-    {
-        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_WRITE;
-        g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
-        g_flashOtaWriteDebug.writeFailCount++;
-
-        g_flashOtaDebug.writeFailCount++;
-        return FALSE;
-    }
-
-    /*
-     * SOTA alternative mapping 상태에서는 즉시 read-back alias가
-     * 실제 write 대상 physical bank와 다르게 보일 수 있으므로,
-     * byte-by-byte verify는 전처리기로 선택한다.
-     *
-     * 현재는 bootloader/CRC 단계에서 전체 firmware 검증 예정.
-     */
-#if (FLASH_OTA_ENABLE_WRITE_VERIFY != 0U)
-    readPtr = (volatile const uint8 *)targetAddrNc;
-
-    for (uint32_t i = 0U; i < FLASH_OTA_PAGE_SIZE; i++)
-    {
-        if (readPtr[i] != page[i])
+        bufferedEnd = (uint16_t)(bufferOffset + copyLength);
+        if (bufferedEnd > g_burstWriteBufferedBytes)
         {
-            g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_VERIFY;
-            g_flashOtaWriteDebug.verifyIndex = i;
-            g_flashOtaWriteDebug.verifyOffset = offset + i;
-            g_flashOtaWriteDebug.verifyExpected = page[i];
-            g_flashOtaWriteDebug.verifyActual = readPtr[i];
-            g_flashOtaWriteDebug.writeFailCount++;
+            g_burstWriteBufferedBytes = bufferedEnd;
+        }
 
-            g_flashOtaDebug.verifyFailOffset = offset + i;
-            g_flashOtaDebug.writeFailCount++;
-            return FALSE;
+        g_burstWritePayloadBytes = (uint16_t)(g_burstWritePayloadBytes + copyLength);
+        g_acceptedBytes += copyLength;
+        copied = (uint16_t)(copied + copyLength);
+
+        if (g_burstWriteBufferedBytes >= FLASH_OTA_BURST_WRITE_SIZE)
+        {
+            if (FlashOta_FlushBurstWriteBuffer() == FALSE)
+            {
+                return FALSE;
+            }
         }
     }
-#else
-    /*
-     * verify off 상태임을 Watch에서 구분하기 위한 표시.
-     * failReason은 NONE 유지.
-     */
+
     g_flashOtaWriteDebug.verifyIndex = 0xFFFFFFFFU;
     g_flashOtaWriteDebug.verifyOffset = 0xFFFFFFFFU;
-#endif
-
-    g_flashOtaDebug.receivedBytes += length;
+    g_flashOtaWriteDebug.writeAddressNc = g_downloadTargetAddrNC + offset;
+    g_flashOtaWriteDebug.writeEndAddressNc = g_downloadTargetAddrNC + offset + length;
     g_flashOtaDebug.lastBlockIndex = blockIndex;
-    g_flashOtaDebug.lastWriteAddress = targetAddrNc;
-    g_flashOtaDebug.writeOkCount++;
+    g_flashOtaDebug.lastWriteAddress = g_downloadTargetAddrNC + offset;
 
     g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_NONE;
-    g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
-    g_flashOtaWriteDebug.writeOkCount++;
 
     return TRUE;
 }
@@ -394,6 +359,11 @@ boolean FlashOta_WriteBlock(uint32_t blockIndex,
 boolean FlashOta_EndTransfer(void)
 {
     if (g_flashOtaDebug.started == FALSE)
+    {
+        return FALSE;
+    }
+
+    if (FlashOta_FlushBurstWriteBuffer() == FALSE)
     {
         return FALSE;
     }
@@ -519,6 +489,82 @@ static void delayMs(uint32 ms)
     uint32 ticks = IfxStm_getTicksFromMilliseconds(stm, ms);
 
     IfxStm_waitTicks(stm, ticks);
+}
+
+static boolean FlashOta_FlushBurstWriteBuffer(void)
+{
+    uint32_t targetAddrNc;
+    uint32_t writeEndAddrNc;
+    uint32_t pageCount;
+    IfxFlash_FlashType flashType;
+
+    if (g_burstWriteActive == FALSE)
+    {
+        return TRUE;
+    }
+
+    targetAddrNc = g_downloadTargetAddrNC + g_burstWriteStartOffset;
+    writeEndAddrNc = targetAddrNc + FLASH_OTA_BURST_WRITE_SIZE;
+
+    g_flashOtaWriteDebug.writeAddressNc = targetAddrNc;
+    g_flashOtaWriteDebug.writeEndAddressNc = writeEndAddrNc;
+
+    while (writeEndAddrNc > g_erasedUntilAddrNC)
+    {
+        flashType = getPFlashTypeFromAddress(g_erasedUntilAddrNC);
+
+        g_flashOtaWriteDebug.eraseAddressNc = g_erasedUntilAddrNC;
+        g_flashOtaWriteDebug.erasedUntilNc = g_erasedUntilAddrNC;
+        g_flashOtaWriteDebug.flashType = (uint32_t)flashType;
+
+        if (SensorOtaFlash_Erase(g_erasedUntilAddrNC,
+                                 FLASH_OTA_SECTOR_SIZE_BYTES,
+                                 flashType) == FALSE)
+        {
+            g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_ERASE;
+            g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
+            g_flashOtaWriteDebug.writeFailCount++;
+            g_flashOtaDebug.writeFailCount++;
+            return FALSE;
+        }
+
+        g_erasedUntilAddrNC += FLASH_OTA_SECTOR_SIZE_BYTES;
+
+        g_flashOtaWriteDebug.eraseCount++;
+        g_flashOtaWriteDebug.erasedUntilNc = g_erasedUntilAddrNC;
+        g_flashOtaDebug.eraseCount++;
+    }
+
+    flashType = getPFlashTypeFromAddress(targetAddrNc);
+    g_flashOtaWriteDebug.flashType = (uint32_t)flashType;
+    g_flashOtaDebug.lastWriteAddress = targetAddrNc;
+
+    if (SensorOtaFlash_WriteBurst(targetAddrNc,
+                                  (const uint8_t *)g_burstWriteBuffer,
+                                  FLASH_OTA_BURST_WRITE_SIZE,
+                                  flashType) == FALSE)
+    {
+        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_WRITE;
+        g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
+        g_flashOtaWriteDebug.writeFailCount++;
+        g_flashOtaDebug.writeFailCount++;
+        return FALSE;
+    }
+
+    pageCount = (g_burstWriteBufferedBytes + FLASH_OTA_PAGE_SIZE - 1U) / FLASH_OTA_PAGE_SIZE;
+    g_flashOtaDebug.receivedBytes += g_burstWritePayloadBytes;
+    g_flashOtaDebug.writeOkCount += pageCount;
+    g_flashOtaWriteDebug.writeOkCount += pageCount;
+    g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_NONE;
+    g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
+
+    memset(g_burstWriteBuffer, 0xFF, sizeof(g_burstWriteBuffer));
+    g_burstWriteActive = FALSE;
+    g_burstWriteStartOffset = 0U;
+    g_burstWritePayloadBytes = 0U;
+    g_burstWriteBufferedBytes = 0U;
+
+    return TRUE;
 }
 
 static IfxFlash_FlashType getPFlashTypeFromAddress(uint32 addr)
