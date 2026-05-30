@@ -269,7 +269,7 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
 .flash-select,.flash-file{width:100%;background:rgba(0,0,0,.28);border:1px solid var(--border);border-radius:9px;color:var(--tx);padding:9px;font-size:12px}
 .flash-actions{display:flex;gap:9px;justify-content:flex-end;margin-top:14px}
 .flash-progress{margin-top:12px;background:rgba(0,0,0,.28);border:1px solid var(--border);border-radius:9px;overflow:hidden}
-.flash-bar{height:7px;background:linear-gradient(90deg,var(--ac),var(--ac2));width:0%;transition:width .2s}
+.flash-bar{height:7px;background:linear-gradient(90deg,var(--ac),var(--ac2));width:0%;transition:width .05s linear}
 .flash-log{margin-top:8px;min-height:42px;color:var(--txs);font-size:11px;line-height:1.6;white-space:pre-wrap}
 
 /* toast */
@@ -1312,7 +1312,7 @@ async function startManualFlash() {
   document.getElementById('flash-log').textContent = `Uploading ${file.name}...`;
   document.getElementById('flash-bar').style.width = '3%';
   if(flashPollTimer) clearInterval(flashPollTimer);
-  flashPollTimer = setInterval(pollFlashProgress, 350);
+  flashPollTimer = setInterval(pollFlashProgress, 50);
   try {
     const payload = {
       board_id: boardId,
@@ -1342,10 +1342,14 @@ async function pollFlashProgress() {
     const r = await fetch('/api/ota/progress/MANUAL_FLASHER');
     if(!r.ok) return;
     const p = await r.json();
-    if(Number.isFinite(p.percent)) {
-      document.getElementById('flash-bar').style.width = `${Math.max(0, Math.min(100, p.percent))}%`;
+    const downloaded = Number(p.bytes_downloaded || 0);
+    const total = Number(p.total_bytes || 0);
+    const bytePercent = total > 0 ? (downloaded * 100 / total) : null;
+    const barPercent = Number.isFinite(bytePercent) ? bytePercent : p.percent;
+    if(Number.isFinite(barPercent)) {
+      document.getElementById('flash-bar').style.width = `${Math.max(0, Math.min(100, barPercent))}%`;
     }
-    const bytes = p.total_bytes ? `\n${p.bytes_downloaded || 0}/${p.total_bytes} bytes` : '';
+    const bytes = total > 0 ? `\n${downloaded}/${total} bytes` : '';
     document.getElementById('flash-log').textContent =
       `${p.target || '-'} / ${p.status || '-'}\n${p.message || ''}${bytes}`;
   } catch {}

@@ -151,6 +151,9 @@ FLASHER_BOARD_CONFIGS: dict[str, dict[str, Any]] = {
         "ecu_address": int(os.getenv("FRONT_ZCU_ECU_ADDRESS", "0x0001"), 0),
         "bank_start": int(os.getenv("FRONT_ZCU_BANK_START", "0x80300000"), 0),
         "timeout_seconds": float(os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "60")),
+        "p2_timeout_seconds": float(os.getenv("FRONT_ZCU_UDS_P2_TIMEOUT_SECONDS", os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "60"))),
+        "p2_star_timeout_seconds": float(os.getenv("FRONT_ZCU_UDS_P2_STAR_TIMEOUT_SECONDS", os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "60"))),
+        "use_server_timing": os.getenv("FRONT_ZCU_UDS_USE_SERVER_TIMING", "0") == "1",
     },
     "sensor-ecu": {
         "id": "sensor-ecu",
@@ -165,7 +168,7 @@ FLASHER_BOARD_CONFIGS: dict[str, dict[str, Any]] = {
         "app_addr": int(os.getenv("AEB_SENSOR_ECU_OTA_APP_ADDR", "0x80020000"), 0),
         "block_size": int(os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_SIZE", "32")),
         "timeout_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_TIMEOUT_SECONDS", "60")),
-        "block_delay_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS", "0.005")),
+        "block_delay_seconds": float(os.getenv("MANUAL_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS", "0")),
         "activate_after_transfer": False,
     },
 }
@@ -258,6 +261,9 @@ STORE_CATALOG = [
                 "ecu_address": 1,
                 "bank_start": 0x80300000,
                 "timeout_seconds": 60,
+                "p2_timeout_seconds": 60,
+                "p2_star_timeout_seconds": 60,
+                "use_server_timing": False,
                 "release_patch_filter": 1,
             },
         ],
@@ -2905,6 +2911,9 @@ def api_server_worker(
                     "ecu_address": board["ecu_address"],
                     "bank_start": board["bank_start"],
                     "timeout_seconds": board["timeout_seconds"],
+                    "p2_timeout_seconds": board["p2_timeout_seconds"],
+                    "p2_star_timeout_seconds": board["p2_star_timeout_seconds"],
+                    "use_server_timing": board["use_server_timing"],
                 }
                 flash_func = ota_manager.flash_bin_via_doip
                 flash_message = f"{board['name']} flashing"
@@ -2921,6 +2930,7 @@ def api_server_worker(
                     "block_size": board["block_size"],
                     "timeout_seconds": board["timeout_seconds"],
                     "block_delay_seconds": board["block_delay_seconds"],
+                    "progress_update_interval_blocks": 1,
                     "activate_after_transfer": board["activate_after_transfer"],
                 }
                 flash_func = ota_manager.flash_sensor_can_ota_via_doip

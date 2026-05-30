@@ -1151,6 +1151,7 @@ class OtaManager:
                 network_lock_acquired = True
             import doipclient
             import udsoncan
+            import udsoncan.configs
             import udsoncan.services
             from doipclient.connectors import DoIPClientUDSConnector
             from udsoncan.client import Client
@@ -1162,7 +1163,16 @@ class OtaManager:
                 tcp_port=doip_port,
             )
             uds_connection = DoIPClientUDSConnector(doip_connection)
-            client = Client(uds_connection, request_timeout=request_timeout)
+            client_config = dict(udsoncan.configs.default_client_config)
+            client_config.update(
+                {
+                    "request_timeout": request_timeout,
+                    "p2_timeout": float(action.get("p2_timeout_seconds", request_timeout)),
+                    "p2_star_timeout": float(action.get("p2_star_timeout_seconds", request_timeout)),
+                    "use_server_timing": bool(action.get("use_server_timing", False)),
+                }
+            )
+            client = Client(uds_connection, config=client_config)
 
             set_progress("install", "flashing", percent_start, f"DoIP connected: {ecu_ip}:{doip_port}")
             with client:
@@ -1273,10 +1283,11 @@ class OtaManager:
         app_addr = int(action.get("app_addr", action.get("bank_start", 0x80020000)))
         block_size = int(action.get("block_size", 32))
         request_timeout = float(action.get("timeout_seconds", 60.0))
-        block_delay = float(action.get("block_delay_seconds", 0.005))
+        block_delay = float(action.get("block_delay_seconds", 0.0))
         activate = bool(action.get("activate_after_transfer", False))
         percent_start = int((progress or {}).get("percent_start", 0))
         percent_end = int((progress or {}).get("percent_end", 100))
+        progress_update_interval_blocks = max(1, int(action.get("progress_update_interval_blocks", 1)))
 
         if block_size <= 0 or block_size > 32:
             raise ValueError("block_size must be 1..32 for Sensor ECU CAN OTA gateway")
@@ -1375,7 +1386,7 @@ class OtaManager:
                 offset = 0
                 seq = 1
                 block_count = 0
-                last_percent: int | None = None
+                last_progress_block = -progress_update_interval_blocks
 
                 while offset < total:
                     chunk = firmware[offset:offset + data_block_size]
@@ -1400,16 +1411,17 @@ class OtaManager:
                             f"TransferData sequence mismatch at block={block_index}, "
                             f"offset={offset}: sent=0x{seq:02X}, got=0x{response[1]:02X}"
                         )
-                    if block_delay > 0:
-                        time.sleep(block_delay)
 
                     offset += len(chunk)
                     seq = 0 if seq >= 0xFF else seq + 1
                     block_count += 1
                     raw_percent = min(100, int(offset * 100 / total))
                     percent = percent_start + int(raw_percent * (percent_end - percent_start) / 100)
-                    if percent != last_percent:
-                        last_percent = percent
+                    if (
+                        block_count - last_progress_block >= progress_update_interval_blocks
+                        or offset >= total
+                    ):
+                        last_progress_block = block_count
                         set_progress(
                             "install",
                             "flashing",
@@ -1417,6 +1429,8 @@ class OtaManager:
                             str((progress or {}).get("message", "Sensor ECU CAN OTA")),
                             offset=offset,
                         )
+                    if block_delay > 0:
+                        time.sleep(block_delay)
 
                 stage = f"RequestTransferExit crc32=0x{crc32:08X}"
                 response = self._sensor_gateway_send_uds(
