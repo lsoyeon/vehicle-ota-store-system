@@ -237,7 +237,6 @@ STORE_CATALOG = [
                 "target": "sensor-ecu",
                 "release_repo": os.getenv("AEB_SENSOR_ECU_OTA_REPO", "HAMES-6th-Overdrive/sensor-ecu"),
                 "target_dir": "firmware",
-                "asset_name": os.getenv("AEB_SENSOR_ECU_OTA_ASSET", "sensor_ecu__slow_toggle.bin"),
                 "ecu_ip": os.getenv("AEB_SENSOR_ECU_OTA_ZCU_IP", "192.168.10.2"),
                 "doip_port": int(os.getenv("AEB_SENSOR_ECU_OTA_DOIP_PORT", "13401")),
                 "tester_address": int(os.getenv("AEB_SENSOR_ECU_OTA_TESTER_ADDRESS", "0x0E00"), 0),
@@ -253,7 +252,7 @@ STORE_CATALOG = [
                 ),
                 "progress_update_interval_blocks": 1,
                 "activate_after_transfer": False,
-                "release_patch_filter": int(os.getenv("AEB_SENSOR_ECU_OTA_RELEASE_PATCH_FILTER", "1")),
+                "release_patch_filter": int(os.getenv("AEB_SENSOR_ECU_OTA_RELEASE_PATCH_FILTER", "0")),
             },
             {
                 "id": "zcu_firmware",
@@ -1324,7 +1323,6 @@ class FeatureStateStore:
                 if isinstance(payload, dict):
                     prepared.update(
                         {
-                            "downloaded_path": payload.get("path"),
                             "downloaded_asset_name": payload.get("asset_name"),
                             "downloaded_version": payload.get("version"),
                             "downloaded_release_tag": payload.get("release_tag"),
@@ -1446,7 +1444,6 @@ class FeatureStateStore:
                     firmware_payloads[str(zcu_result.action_id)] = {
                         "downloaded": zcu_result.downloaded,
                         "applied": zcu_result.applied,
-                        "path": zcu["path"],
                         "action_id": zcu_result.action_id,
                         "action_type": zcu_result.action_type,
                         "target": zcu_result.target,
@@ -1690,7 +1687,6 @@ class FeatureStateStore:
             firmware_payloads[str(zcu_result.action_id)] = {
                 "downloaded": zcu_result.downloaded,
                 "applied": zcu_result.applied,
-                "path": zcu["path"],
                 "action_id": zcu_result.action_id,
                 "action_type": zcu_result.action_type,
                 "target": zcu_result.target,
@@ -1765,19 +1761,14 @@ class FeatureStateStore:
                 payload = payloads.get(str(action.get("id", "firmware")))
                 if not isinstance(payload, dict) or not payload.get("downloaded"):
                     return False
-                raw_path = payload.get("path")
-                raw_asset = payload.get("asset_name") or action.get("asset_name")
-                path = None
-                if raw_path:
-                    path = Path(str(raw_path))
-                    if not path.is_absolute():
-                        path = self.ota_manager.base_dir / path
-                elif raw_asset:
-                    path = self.ota_manager.resolve_target_path(
-                        {**action, "target_dir": str(action.get("target_dir", "firmware"))},
-                        str(raw_asset),
-                    )
-                if path is None or not path.exists():
+                asset_name = payload.get("asset_name")
+                if not asset_name:
+                    return False
+                path = self.ota_manager.resolve_target_path(
+                    {**action, "target_dir": str(action.get("target_dir", "firmware"))},
+                    str(asset_name),
+                )
+                if not path.exists():
                     return False
             return True
 

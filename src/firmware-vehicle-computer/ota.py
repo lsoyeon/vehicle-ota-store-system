@@ -321,7 +321,8 @@ class DoipUdsFlashAction(OtaAction):
         release_tag = str(release.get("tag_name") or "")
         version = clean_firmware_version(release_tag) or str(catalog_item.get("latest_version", "1.0.0"))
         release_url = release.get("html_url")
-        download_file = manager.release_bin_asset_name(release, action.get("asset_name"))
+        release_asset = manager.release_bin_asset(release)
+        download_file = str(release_asset["name"])
         bin_path = manager.resolve_target_path(
             {**action, "target_dir": str(action.get("target_dir", "firmware"))},
             download_file,
@@ -367,9 +368,8 @@ class DoipUdsFlashAction(OtaAction):
             message="ZCU 펌웨어 다운로드 중",
             active=True,
         )
-        firmware_bytes, asset_name = manager.download_release_bin_asset(
-            release,
-            download_file,
+        firmware_bytes = manager._request_bytes(
+            str(release_asset["browser_download_url"]),
             progress={
                 "feature_id": feature_id,
                 "action_id": action_id,
@@ -380,6 +380,7 @@ class DoipUdsFlashAction(OtaAction):
                 "percent_end": percent_flash_start,
             },
         )
+        asset_name = download_file
         bin_path.parent.mkdir(parents=True, exist_ok=True)
         temp_target = bin_path.with_suffix(bin_path.suffix + ".tmp")
         temp_target.write_bytes(firmware_bytes)
@@ -478,7 +479,8 @@ class DoipSensorCanOtaAction(OtaAction):
         release_tag = str(release.get("tag_name") or "")
         version = clean_firmware_version(release_tag) or str(catalog_item.get("latest_version", "1.0.0"))
         release_url = release.get("html_url")
-        download_file = manager.release_bin_asset_name(release, action.get("asset_name"))
+        release_asset = manager.release_bin_asset(release)
+        download_file = str(release_asset["name"])
         bin_path = manager.resolve_target_path(
             {**action, "target_dir": str(action.get("target_dir", "firmware"))},
             download_file,
@@ -524,9 +526,8 @@ class DoipSensorCanOtaAction(OtaAction):
             message="Sensor ECU 펌웨어 다운로드 중",
             active=True,
         )
-        firmware_bytes, asset_name = manager.download_release_bin_asset(
-            release,
-            download_file,
+        firmware_bytes = manager._request_bytes(
+            str(release_asset["browser_download_url"]),
             progress={
                 "feature_id": feature_id,
                 "action_id": action_id,
@@ -537,6 +538,7 @@ class DoipSensorCanOtaAction(OtaAction):
                 "percent_end": percent_transfer_start,
             },
         )
+        asset_name = download_file
         bin_path.parent.mkdir(parents=True, exist_ok=True)
         temp_target = bin_path.with_suffix(bin_path.suffix + ".tmp")
         temp_target.write_bytes(firmware_bytes)
@@ -771,7 +773,8 @@ class OtaManager:
         release = self.fetch_latest_release(catalog_item, action)
         release_tag = str(release.get("tag_name") or "")
         version = clean_firmware_version(release_tag) or str(catalog_item.get("latest_version", "1.0.0"))
-        download_file = self.release_bin_asset_name(release, action.get("asset_name"))
+        release_asset = self.release_bin_asset(release)
+        download_file = str(release_asset["name"])
         bin_path = self.resolve_target_path(
             {**action, "target_dir": str(action.get("target_dir", "firmware"))},
             download_file,
@@ -782,6 +785,7 @@ class OtaManager:
             "release_url": release.get("html_url"),
             "version": version,
             "asset_name": download_file,
+            "asset_url": release_asset["browser_download_url"],
             "path": bin_path,
         }
 
@@ -846,9 +850,8 @@ class OtaManager:
                 checked_at=checked_at,
             )
 
-        firmware_bytes, asset_name = self.download_release_bin_asset(
-            context["release"],
-            str(context["asset_name"]),
+        firmware_bytes = self._request_bytes(
+            str(context["asset_url"]),
             progress={
                 "feature_id": feature_id,
                 "action_id": action_id,
@@ -859,6 +862,7 @@ class OtaManager:
                 "percent_end": percent_end,
             },
         )
+        asset_name = str(context["asset_name"])
         bin_path.parent.mkdir(parents=True, exist_ok=True)
         temp_target = bin_path.with_suffix(bin_path.suffix + ".tmp")
         temp_target.write_bytes(firmware_bytes)
@@ -914,22 +918,15 @@ class OtaManager:
                 "path": path,
             }
 
-        downloaded_path = action.get("downloaded_path")
-        if downloaded_path:
-            path = Path(str(downloaded_path))
-            if not path.is_absolute():
-                path = self.base_dir / path
-            if path.exists():
-                return metadata(path, action.get("downloaded_asset_name"))
-
-        asset_name = action.get("downloaded_asset_name") or action.get("asset_name")
-        if asset_name:
+        downloaded_asset_name = action.get("downloaded_asset_name")
+        if downloaded_asset_name:
             path = self.resolve_target_path(
                 {**action, "target_dir": str(action.get("target_dir", "firmware"))},
-                str(asset_name),
+                str(downloaded_asset_name),
             )
-            if path.exists():
-                return metadata(path, asset_name)
+            if not path.exists():
+                raise FileNotFoundError(f"downloaded firmware not found: {path}")
+            return metadata(path, downloaded_asset_name)
 
         return self._firmware_action_context(catalog_item, action)
 
@@ -953,22 +950,15 @@ class OtaManager:
                 "path": path,
             }
 
-        downloaded_path = action.get("downloaded_path")
-        if downloaded_path:
-            path = Path(str(downloaded_path))
-            if not path.is_absolute():
-                path = self.base_dir / path
-            if path.exists():
-                return metadata(path, action.get("downloaded_asset_name"))
-
-        asset_name = action.get("downloaded_asset_name") or action.get("asset_name")
-        if asset_name:
+        downloaded_asset_name = action.get("downloaded_asset_name")
+        if downloaded_asset_name:
             path = self.resolve_target_path(
                 {**action, "target_dir": str(action.get("target_dir", "firmware"))},
-                str(asset_name),
+                str(downloaded_asset_name),
             )
-            if path.exists():
-                return metadata(path, asset_name)
+            if not path.exists():
+                raise FileNotFoundError(f"downloaded firmware not found: {path}")
+            return metadata(path, downloaded_asset_name)
         return None
 
     def flash_firmware_file(
@@ -1146,9 +1136,8 @@ class OtaManager:
             )
 
         flash_start = percent_start + int((percent_end - percent_start) * 0.25)
-        firmware_bytes, asset_name = self.download_release_bin_asset(
-            context["release"],
-            str(context["asset_name"]),
+        firmware_bytes = self._request_bytes(
+            str(context["asset_url"]),
             progress={
                 "feature_id": feature_id,
                 "action_id": action_id,
@@ -1159,6 +1148,7 @@ class OtaManager:
                 "percent_end": flash_start,
             },
         )
+        asset_name = str(context["asset_name"])
         bin_path.parent.mkdir(parents=True, exist_ok=True)
         temp_target = bin_path.with_suffix(bin_path.suffix + ".tmp")
         temp_target.write_bytes(firmware_bytes)
@@ -1396,28 +1386,8 @@ class OtaManager:
 
         raise FileNotFoundError(f"release asset not found: {download_file}")
 
-    def download_release_bin_asset(
-        self,
-        release: dict[str, Any],
-        asset_name: Any = None,
-        *,
-        progress: dict[str, Any] | None = None,
-    ) -> tuple[bytes, str]:
-        name = self.release_bin_asset_name(release, asset_name)
-        assets = release.get("assets", [])
-        if not isinstance(assets, list):
-            assets = []
-        for asset in assets:
-            if (
-                isinstance(asset, dict)
-                and asset.get("name") == name
-                and asset.get("browser_download_url")
-            ):
-                return self._request_bytes(str(asset["browser_download_url"]), progress=progress), name
-
-        raise FileNotFoundError(f"release asset not found: {name}")
-
-    def release_bin_asset_name(self, release: dict[str, Any], asset_name: Any = None) -> str:
+    @staticmethod
+    def release_bin_asset(release: dict[str, Any]) -> dict[str, Any]:
         assets = release.get("assets", [])
         if not isinstance(assets, list):
             assets = []
@@ -1429,19 +1399,10 @@ class OtaManager:
             and asset.get("browser_download_url")
             and str(asset.get("name", "")).lower().endswith(".bin")
         ]
-        if asset_name:
-            expected = str(asset_name)
-            for asset in bin_assets:
-                if asset.get("name") == expected:
-                    return expected
-            raise FileNotFoundError(f"release asset not found: {expected}")
-
         if len(bin_assets) != 1:
             names = ", ".join(str(asset.get("name")) for asset in bin_assets) or "none"
             raise FileNotFoundError(f"expected exactly one .bin release asset, found: {names}")
-
-        asset = bin_assets[0]
-        return str(asset["name"])
+        return bin_assets[0]
 
     def _request_bytes(
         self,
