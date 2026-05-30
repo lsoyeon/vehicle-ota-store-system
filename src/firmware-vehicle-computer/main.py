@@ -1361,14 +1361,7 @@ class FeatureStateStore:
             action["progress_end"] = int((index + 1) * 100 / firmware_count)
             target_name = ota_target_display_name(action.get("target", "zcu"))
             try:
-                has_downloaded_payload = bool(action.get("downloaded_path") or action.get("downloaded_asset_name"))
-                if has_downloaded_payload:
-                    try:
-                        zcu_result = self.ota_manager.flash_downloaded_firmware_payload(item, action)
-                    except FileNotFoundError:
-                        zcu_result = self.ota_manager.run_action(item, action, force=True)
-                else:
-                    zcu_result = self.ota_manager.run_action(item, action, force=True)
+                zcu_result = self.ota_manager.flash_firmware_payload(item, action, force=True)
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 self.ota_manager.update_progress(
@@ -1641,7 +1634,7 @@ class FeatureStateStore:
                     or record.get("version")
                 )
                 if run_flash:
-                    zcu_result = self.ota_manager.run_action(
+                    zcu_result = self.ota_manager.flash_firmware_payload(
                         item,
                         action,
                         current_version=current_firmware_version,
@@ -3163,7 +3156,7 @@ def api_server_worker(
                     return False
                 if feature_state_store.is_feature_installed(feature_id):
                     return False
-                return feature_state_store.are_firmware_payloads_downloaded(feature_id)
+                return True
             except Exception as exc:
                 logger.warning("store auto OTA state check failed for %s: %s", feature_id, exc)
                 return False
@@ -3356,7 +3349,6 @@ def api_server_worker(
                     "p2_star_timeout_seconds": board["p2_star_timeout_seconds"],
                     "use_server_timing": board["use_server_timing"],
                 }
-                flash_func = ota_manager.flash_bin_via_doip
                 flash_message = f"{board['name']} flashing"
             elif transport == "doip_sensor_can_ota":
                 action = {
@@ -3374,7 +3366,6 @@ def api_server_worker(
                     "progress_update_interval_blocks": 1,
                     "activate_after_transfer": board["activate_after_transfer"],
                 }
-                flash_func = ota_manager.flash_sensor_can_ota_via_doip
                 flash_message = f"{board['name']} CAN OTA via ZCU"
             else:
                 raise HTTPException(status_code=501, detail=f"unsupported transport: {transport}")
@@ -3394,8 +3385,8 @@ def api_server_worker(
                 total_bytes=len(firmware),
             )
             try:
-                success = await run_in_threadpool(
-                    flash_func,
+                flash_result = await run_in_threadpool(
+                    ota_manager.flash_firmware_file,
                     saved_path,
                     MANUAL_FLASHER_PROGRESS_ID,
                     action,
@@ -3405,25 +3396,17 @@ def api_server_worker(
                         "action_type": action_type,
                         "target": body.board_id,
                         "message": flash_message,
+                        "complete_message": f"{board['name']} flash complete",
+                        "failed_message": f"{board['name']} flash failed",
                         "percent_start": 5,
                         "percent_end": 100,
                     },
+                    asset_name=filename,
+                    checked_at=utc_now(),
                 )
             except (OSError, RuntimeError, ValueError) as exc:
                 raise HTTPException(status_code=502, detail=str(exc)) from exc
-            ota_manager.update_progress(
-                MANUAL_FLASHER_PROGRESS_ID,
-                action_id="manual_flash",
-                action_type=action_type,
-                target=body.board_id,
-                phase="complete" if success else "error",
-                status="complete" if success else "failed",
-                percent=100 if success else None,
-                message=f"{board['name']} flash complete" if success else f"{board['name']} flash failed",
-                active=False,
-                bytes_downloaded=len(firmware),
-                total_bytes=len(firmware),
-            )
+            success = bool(flash_result.applied)
             return {
                 "ok": success,
                 "board": {"id": board["id"], "name": board["name"]},
