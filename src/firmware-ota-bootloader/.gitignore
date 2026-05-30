@@ -21,3 +21,8 @@ Configurations/lwipopts.h
 .vscode/settings.json
 Libraries/Ethernet/lwip/port/src/Ifx_Lwip.c
 Configurations/lwipopts.h
+Libraries/
+Configurations/
+Libraries/Services/
+Libraries/Infra/
+Libraries/.ads/
