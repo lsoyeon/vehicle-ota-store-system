@@ -41,7 +41,7 @@
 html,body{width:100%;height:100%;overflow:hidden}
 body{font-family:var(--font-body);background:var(--bg);color:var(--tx);height:100vh;transition:background .4s,color .4s}
 
-/* 배경 격자 (루피 테마에서 별 패턴으로) */
+/* 배경 격자 */
 body::before{
   content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
   background-image:linear-gradient(rgba(0,200,255,.025) 1px,transparent 1px),
@@ -51,16 +51,6 @@ body::before{
   background-image:radial-gradient(circle, rgba(200,120,220,.12) 1px, transparent 1px);
   background-size:32px 32px;
 }
-
-.luffy-deco{display:none;position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden}
-.luffy-deco span{position:absolute;font-size:18px;opacity:.15;animation:float-deco 6s ease-in-out infinite;}
-.luffy-deco span:nth-child(1){top:8%;left:5%;animation-delay:0s}
-.luffy-deco span:nth-child(2){top:15%;right:8%;animation-delay:1s;font-size:14px}
-.luffy-deco span:nth-child(3){top:70%;left:3%;animation-delay:2s;font-size:22px}
-.luffy-deco span:nth-child(4){top:80%;right:5%;animation-delay:.5s;font-size:16px}
-.luffy-deco span:nth-child(5){top:45%;left:50%;animation-delay:3s;font-size:12px}
-.luffy-deco span:nth-child(6){top:25%;left:30%;animation-delay:1.5s;font-size:10px}
-@keyframes float-deco{0%,100%{transform:translateY(0) rotate(0deg)}50%{transform:translateY(-12px) rotate(10deg)}}
 
 .root{position:relative;z-index:1;display:flex;flex-direction:column;height:100vh;padding:11px;gap:9px}
 
@@ -230,26 +220,6 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
 .aeb-close{margin-top:18px;border:1px solid rgba(255,80,80,.55);border-radius:10px;background:rgba(255,40,40,.16);color:#ffdede;padding:10px 22px;font:inherit;font-size:13px;font-weight:800;cursor:pointer}
 .aeb-close:hover{background:rgba(255,70,70,.25)}
 
-/* 루피 슬라이드인 알림 */
-.luffy-notif{position:fixed;top:68px;right:14px;z-index:800;width:280px;transform:translateX(300px);transition:transform .45s cubic-bezier(.34,1.56,.64,1)}
-.luffy-notif.show{transform:translateX(0)}
-.lcard{background:linear-gradient(135deg,rgba(10,20,40,.97),rgba(6,12,28,.97));border:1px solid var(--ba);border-radius:15px;padding:14px;box-shadow:var(--glow),0 8px 32px rgba(0,0,0,.5);backdrop-filter:blur(20px);position:relative;overflow:hidden}
-.lcard::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:linear-gradient(180deg,var(--ac),var(--ac2));border-radius:15px 0 0 15px}
-.lhdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}
-.lbadge{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--ac);padding:2px 8px;border-radius:7px;background:rgba(0,200,255,.12);border:1px solid rgba(0,200,255,.25)}
-.lclose{background:transparent;border:none;color:var(--txs);cursor:pointer;font-size:13px;padding:2px 5px}
-.lclose:hover{color:var(--tx)}
-.litems{display:flex;flex-direction:column;gap:7px;margin-bottom:10px}
-.litem{display:flex;align-items:center;gap:9px}
-.liicon{width:32px;height:32px;border-radius:9px;background:rgba(0,200,255,.1);border:1px solid rgba(0,200,255,.2);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
-.liname{font-size:12px;font-weight:700;color:var(--tx)}
-.lidesc{font-size:10px;color:var(--txs);margin-top:1px}
-.lactbtn{background:linear-gradient(135deg,var(--ac),var(--ac2));color:#000;border:none;border-radius:9px;padding:7px;font-size:11px;font-weight:700;cursor:pointer;width:100%;font-family:var(--font-body);transition:.2s}
-.lactbtn:hover{opacity:.9;transform:translateY(-1px)}
-.lpbar{position:absolute;bottom:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--ac),var(--ac2));transform-origin:left}
-.luffy-notif.show .lpbar{animation:lshrink 5s linear .5s forwards}
-@keyframes lshrink{from{transform:scaleX(1)}to{transform:scaleX(0)}}
-
 /* 시연 패널 */
 .demo-bar{position:fixed;bottom:14px;right:14px;display:flex;gap:6px;z-index:500;flex-direction:column;align-items:flex-end}
 .demo-toggle{background:rgba(255,255,255,.07);border:1px solid var(--border);color:var(--txs);border-radius:20px;padding:5px 12px;font-size:10px;cursor:pointer;font-family:var(--font-body);transition:.2s}
@@ -388,16 +358,10 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
       <button class="tbtn active" id="t-dark"  onclick="setTheme('dark')">다크</button>
       <button class="tbtn" id="t-light" onclick="setTheme('light')">라이트</button>
       <button class="tbtn" id="t-blue"  onclick="setTheme('blue')">블루</button>
-      <button class="tbtn" id="t-luffy" onclick="setTheme('luffy')" style="display:none">🐾 루피</button>
     </div>
     <div style="font-size:10px;color:var(--txs)" id="lastsync">--</div>
   </div>
 
-</div>
-
-<!-- ══ 루피 배경 장식 ══ -->
-<div class="luffy-deco">
-  <span>⭐</span><span>💜</span><span>🐾</span><span>✨</span><span>💫</span><span>🌸</span>
 </div>
 
 <!-- ══ OTA 알림 배너 ══ -->
@@ -456,26 +420,11 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
   </div>
 </div>
 
-<!-- ══ 루피 알림 ══ -->
-<div class="luffy-notif" id="luffy-notif">
-  <div class="lcard">
-    <div class="lpbar"></div>
-    <div class="lhdr">
-      <div class="lbadge">NEW IN STORE</div>
-      <button class="lclose" onclick="closeLuffy()">✕</button>
-    </div>
-    <div class="litems" id="litems"></div>
-    <button class="lactbtn" onclick="goStore();closeLuffy()">스토어에서 보기 →</button>
-  </div>
-</div>
-
 <!-- ══ 시연 패널 ══ -->
 <div class="demo-bar">
   <button class="demo-toggle" onclick="toggleDemo()">🔧 시연</button>
   <div class="demo-panel" id="demopanel">
     <div style="font-size:9px;color:var(--txs);letter-spacing:1px">DEMO CONTROLS</div>
-    <div class="dsec">기능 알림</div>
-    <button class="dbtn" onclick="demoNewFeature()">🆕 새 기능 스토어 등록 알림</button>
     <button class="dbtn" onclick="demoVersionUpdate()">⬆️ 버전 업데이트 배너</button>
     <button class="dbtn" onclick="checkLatestVersions()">최신버전 확인</button>
     <div class="dsec">안전</div>
@@ -566,7 +515,6 @@ function otaProgressPercent(progress) {
 const DAYS = ['일','월','화','수','목','금','토'];
 
 let curTheme = 'dark';
-let luffyShown = false;
 let pendingOtaData = null;
 let pendingOtaKey = null;
 let dismissedOtaKey = null;
@@ -617,8 +565,6 @@ function dispatch(d) {
     case 'ota_skipped':       closeOv('ov-ota-confirm'); break;
     case 'ota_result_on_boot': showBootResult(d.result); break;
     case 'aeb_triggered':     showAebAlert(); break;
-    case 'new_store_item':      onNewStoreItem(d.items); break;
-    case 'theme_download_start': onThemeDownload(d); break;
     default: if(d.speed!==undefined) updateDash(d);
   }
 }
@@ -681,12 +627,6 @@ function updateDash(d) {
 
   // 테마
   if(d.ui_theme && d.ui_theme !== curTheme) applyTheme(d.ui_theme);
-  // 루피 버튼: 실제로 CSS 파일이 로컬에 존재할 때만 표시
-  // (구매 + 다운로드 완료 = available_themes에 포함됨)
-  const luffyAvailable = (d.available_themes||[]).includes('luffy');
-  const luffyBtn = document.getElementById('t-luffy');
-  if(luffyBtn) luffyBtn.style.display = luffyAvailable ? '' : 'none';
-
   const ota = d.pending_ota || {};
   const progressMap = d.ota_progress || {};
   const visibleOta = {
@@ -938,15 +878,6 @@ function vehicleLinkText(state = {}) {
    테마
    ════════════════════════ */
 async function setTheme(t) {
-  // 루피 테마: CSS 파일 실제 존재 여부 먼저 확인
-  if(t === 'luffy') {
-    const r = await fetch(`/api/theme-available/luffy`);
-    const d = await r.json();
-    if(!d.available) {
-      toast('⚠️ 루피 테마 파일이 없습니다. 스토어에서 먼저 구매하세요.');
-      return;
-    }
-  }
   applyTheme(t);
   try {
     await fetch('/api/theme',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})});
@@ -954,52 +885,13 @@ async function setTheme(t) {
 }
 function applyTheme(t) {
   curTheme = t;
-  // 루피 테마: 외부에서 다운받은 CSS 파일이 있으면 동적으로 로드
-  if(t === 'luffy') {
-    loadThemeCss('luffy');
-  }
   document.body.setAttribute('data-theme',t);
   document.getElementById('root').setAttribute('data-theme',t);
-  ['dark','light','blue','luffy'].forEach(n=>document.getElementById(`t-${n}`)?.classList.toggle('active',n===t));
-
-  if(t==='luffy'){
-    document.getElementById('logo-text').textContent = '🐾 잔망루피';
-    document.getElementById('fempty-text').textContent = '구매한 기능이 없어요 🥺';
-  } else {
-    document.getElementById('logo-text').textContent = 'SMART VEHICLE';
-    document.getElementById('fempty-text').textContent = '구매한 기능이 없습니다.';
-  }
+  ['dark','light','blue'].forEach(n=>document.getElementById(`t-${n}`)?.classList.toggle('active',n===t));
+  document.getElementById('logo-text').textContent = 'SMART VEHICLE';
+  document.getElementById('fempty-text').textContent = '구매한 기능이 없습니다.';
 }
 
-/**
- * 외부 서버에서 다운로드된 테마 CSS를 동적으로 <link>로 삽입.
- * Vehicle Computer server.py가 /themes/{id}.css 로 파일을 서빙함.
- * (외부 서버가 Vehicle Computer로 전달 -> Vehicle Computer가 /static/themes/로 노출)
- */
-function loadThemeCss(themeId) {
-  const existingId = `theme-css-${themeId}`;
-  if(document.getElementById(existingId)) return; // 이미 로드됨
-
-  const link = document.createElement('link');
-  link.rel = 'stylesheet';
-  link.id = existingId;
-  link.href = `/themes/${themeId}.css?v=${Date.now()}`;
-  link.onerror = () => {
-    // CSS 파일이 없으면 테마 적용 불가 - 다크로 복귀
-    console.error(`[테마] /themes/${themeId}.css 없음 — 테마 파일을 먼저 구매하세요`);
-    toast('⚠️ 테마 파일 없음. 스토어에서 구매 후 다시 시도하세요.');
-    // 다크 테마로 복귀
-    document.body.removeAttribute('data-theme');
-    document.getElementById('root').removeAttribute('data-theme');
-    fetch('/api/theme',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:'dark'})}).catch(()=>{});
-    document.getElementById(existingId)?.remove();
-  };
-  document.head.appendChild(link);
-}
-
-function onThemeDownload(d) {
-  toast(`⬇️ ${d.message}`, 3000);
-}
 
 function otaItems(pending=pendingOtaData) {
   if(!pending) return [];
@@ -1151,21 +1043,6 @@ function showBootResult(r) {
 function showOv(id){document.getElementById(id).classList.add('show')}
 function closeOv(id){document.getElementById(id).classList.remove('show')}
 
-/* ════════════════════════
-   루피 알림
-   ════════════════════════ */
-function showLuffy(items) {
-  if(luffyShown) return;
-  luffyShown = true;
-  document.getElementById('litems').innerHTML = items.map(i=>`
-    <div class="litem">
-      <div class="liicon">${i.icon}</div>
-      <div><div class="liname">${i.name}</div><div class="lidesc">${i.desc}</div></div>
-    </div>`).join('');
-  const n=document.getElementById('luffy-notif');n.classList.add('show');
-  setTimeout(()=>closeLuffy(),5600);
-}
-function closeLuffy(){document.getElementById('luffy-notif').classList.remove('show')}
 
 /* ════════════════════════
    AEB
@@ -1204,27 +1081,6 @@ function goStore(){window.location.href='./store.html'}
    ════════════════════════ */
 function toggleDemo(){document.getElementById('demopanel').classList.toggle('open')}
 
-async function demoNewFeature() {
-  luffyShown = false; // 반드시 리셋 먼저
-  toggleDemo();
-  try {
-    const r = await fetch('/api/demo/reveal-luffy', {method:'POST'});
-    const d = await r.json();
-    // WS broadcast가 오면 onNewStoreItem에서 처리됨
-    // 만약 WS가 늦으면 직접 showLuffy 호출 (fallback)
-    if(d.success && !luffyShown) {
-      showLuffy([{icon:'🐾', name:'잔망루피 오리지널 테마', desc:'새로운 UI 테마가 스토어에 등록됐습니다!'}]);
-    }
-  } catch { toast('서버 연결 실패 — 서버가 실행 중인지 확인하세요'); }
-}
-
-// 서버로부터 새 스토어 아이템 등록 알림 수신 (WS)
-function onNewStoreItem(items) {
-  showLuffy(items);
-  if(items.some(i => i.id === '루피테마')) {
-    document.getElementById('t-luffy').style.display = '';
-  }
-}
 
 function demoVersionUpdate() {
   pendingOtaData = {

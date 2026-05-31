@@ -41,17 +41,6 @@
   --muted: rgba(160, 190, 255, 0.48);
 }
 
-[data-theme="luffy"] {
-  --bg: #fdf6ff;
-  --panel: rgba(255, 245, 255, 0.94);
-  --panel-strong: rgba(255, 248, 255, 0.98);
-  --border: rgba(200, 120, 220, 0.18);
-  --accent: #c87de8;
-  --accent-2: #ff8bc8;
-  --text: #4a2060;
-  --muted: rgba(100, 60, 130, 0.58);
-}
-
 * { box-sizing: border-box; }
 body {
   margin: 0;
@@ -434,12 +423,11 @@ let cardProgressBusy = false;
 const cardProgressActive = new Set();
 
 function itemInitial(item) {
-  if (item.id === "LUFFY_THEME") return "THEME";
   return item.name || item.id;
 }
 
 function kindLabel(kind) {
-  return kind === "theme" ? "테마" : "기능";
+  return "기능";
 }
 
 function otaBoardLabel(target) {
@@ -663,8 +651,7 @@ async function syncTheme() {
     if (status.ui_theme) {
       document.body.dataset.theme = status.ui_theme;
       document.getElementById("page").dataset.theme = status.ui_theme;
-      document.getElementById("store-title").textContent =
-        status.ui_theme === "luffy" ? "Luffy Store" : "Feature Store";
+      document.getElementById("store-title").textContent = "Feature Store";
     }
   } catch {
     document.getElementById("store-title").textContent = "Feature Store";
