@@ -193,6 +193,28 @@ void AppDiagCore1_MainFunction(void)
     uint16 localTxLen = 0u;
     uint32 waitLoop;
 
+    if (g_resetPending)
+    {
+        AppCore1Debug_Push("Reset Pended!");
+        /*
+         * Core0 must copy and transmit the DoIP positive response first.
+         * Wait until Core0 changes DONE -> IDLE, then reset.
+         */
+        for (waitLoop = 0u; waitLoop < 5000000u; waitLoop++)
+        {
+            if (g_diagCore1.state != APP_DIAG_CORE1_STATE_DONE)
+            {
+                break;
+            }
+            __nop();
+        }
+
+        AppCore1Debug_Push("OverDrive Front-ZCU Update completed!");
+
+        AppDiagCore1_DelayBeforeReset();
+        IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
+    }    
+
     if (g_diagCore1.state != APP_DIAG_CORE1_STATE_PENDING)
     {
         return;
@@ -221,28 +243,6 @@ void AppDiagCore1_MainFunction(void)
     __dsync();
     g_diagCore1.state = APP_DIAG_CORE1_STATE_DONE;
     __dsync();
-
-    if (g_resetPending)
-    {
-        AppCore1Debug_Push("Reset Pended!");
-        /*
-         * Core0 must copy and transmit the DoIP positive response first.
-         * Wait until Core0 changes DONE -> IDLE, then reset.
-         */
-        for (waitLoop = 0u; waitLoop < 5000000u; waitLoop++)
-        {
-            if (g_diagCore1.state != APP_DIAG_CORE1_STATE_DONE)
-            {
-                break;
-            }
-            __nop();
-        }
-
-        AppCore1Debug_Push("OverDrive Front-ZCU Update completed!");
-
-        AppDiagCore1_DelayBeforeReset();
-        IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
-    }
 }
 
 uint32 AppDiagCore1_GetRequestCount(void) { return g_req_count; }
