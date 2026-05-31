@@ -1368,6 +1368,45 @@ class FeatureStateStore:
             action["progress_start"] = int(index * 100 / firmware_count)
             action["progress_end"] = int((index + 1) * 100 / firmware_count)
             target_name = ota_target_display_name(action.get("target", "zcu"))
+            action_id = str(action.get("id", "firmware"))
+            existing_payload = payloads.get(action_id)
+            requested_asset = action.get("downloaded_asset_name")
+            existing_asset = existing_payload.get("asset_name") if isinstance(existing_payload, dict) else None
+            if (
+                isinstance(existing_payload, dict)
+                and existing_payload.get("applied")
+                and (requested_asset is None or str(requested_asset) == str(existing_asset))
+            ):
+                self.ota_manager.update_progress(
+                    feature_id,
+                    action_id=action_id,
+                    action_type=str(action.get("type", "firmware")),
+                    target=str(action.get("target", "firmware")),
+                    phase="complete",
+                    status="skipped",
+                    percent=int(action.get("progress_end", 100)),
+                    message=f"{target_name} OTA already applied; skipping",
+                    active=True,
+                )
+                with self._lock:
+                    data = self._load_unlocked()
+                    record = data["items"][feature_id]
+                    version_payload = {
+                        FEATURE_VERSION_TARGET: record.get("version"),
+                        **firmware_target_versions(record),
+                    }
+                results.append(
+                    {
+                        "feature_id": feature_id,
+                        "feature_name": item.get("name", feature_id),
+                        "ecu_target": target_name,
+                        "success": True,
+                        "version": version_payload,
+                        "error": None,
+                        "skipped": True,
+                    }
+                )
+                continue
             try:
                 zcu_result = self.ota_manager.flash_firmware_payload(item, action, force=True)
             except Exception as exc:
@@ -1494,6 +1533,10 @@ class FeatureStateStore:
             with self._lock:
                 data = self._load_unlocked()
                 record = data["items"][feature_id]
+                zcu = record["zcu_ota"]
+                zcu["applied"] = self._is_record_installed(item, record)
+                if zcu["applied"] and not zcu.get("applied_at"):
+                    zcu["applied_at"] = utc_now()
                 self._remove_feature_pending_unlocked(data, feature_id)
                 self._queue_reset_trigger_unlocked(data, item, record)
                 self._save_unlocked(data)
@@ -1717,6 +1760,9 @@ class FeatureStateStore:
         if firmware_failed:
             record["zcu_ota"]["applied"] = False
         elif run_flash and force and zcu_actions:
+            record["zcu_ota"]["applied"] = self._is_record_installed(item, record)
+            if record["zcu_ota"]["applied"] and not record["zcu_ota"].get("applied_at"):
+                record["zcu_ota"]["applied_at"] = utc_now()
             self.ota_manager.update_progress(
                 feature_id,
                 action_id="complete",

@@ -24,6 +24,8 @@ SENSOR_GATEWAY_PT_ROUTING_ACT_REQ = 0x0005
 SENSOR_GATEWAY_PT_ROUTING_ACT_RES = 0x0006
 SENSOR_GATEWAY_PT_DIAG_MESSAGE = 0x8001
 SENSOR_GATEWAY_PT_DIAG_ACK = 0x8002
+SENSOR_GATEWAY_UDS_NEGATIVE_RESPONSE = 0x7F
+SENSOR_GATEWAY_UDS_NRC_RESPONSE_PENDING = 0x78
 SENSOR_CAN_OTA_MAX_FRAME_PAYLOAD = 64
 SENSOR_CAN_OTA_TRANSFER_OVERHEAD = 2
 SENSOR_CAN_OTA_MAX_DATA_BLOCK_SIZE = SENSOR_CAN_OTA_MAX_FRAME_PAYLOAD - SENSOR_CAN_OTA_TRANSFER_OVERHEAD
@@ -2084,7 +2086,13 @@ class OtaManager:
                 if not got_ack:
                     # Some ZCU builds may send the diagnostic response before the ACK.
                     pass
-                if len(response) >= 3 and response[0] == 0x7F:
+                if (
+                    len(response) >= 3
+                    and response[0] == SENSOR_GATEWAY_UDS_NEGATIVE_RESPONSE
+                    and response[2] == SENSOR_GATEWAY_UDS_NRC_RESPONSE_PENDING
+                ):
+                    continue
+                if len(response) >= 3 and response[0] == SENSOR_GATEWAY_UDS_NEGATIVE_RESPONSE:
                     raise SensorGatewayDoipError(
                         f"UDS negative response: sid=0x{response[1]:02X}, nrc=0x{response[2]:02X}"
                     )
