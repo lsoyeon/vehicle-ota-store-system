@@ -713,6 +713,15 @@ class VehicleControl:
         self._report_runtime_status(feature)
         return feature.downloaded and feature.applied
 
+    def _feature_installed(self, feature_id: str) -> bool:
+        if self._feature_state_store is None:
+            return self._feature_can_run(feature_id)
+        try:
+            return bool(self._feature_state_store.is_feature_installed(feature_id))
+        except Exception as exc:
+            logger.warning("feature install state load failed for %s: %s", feature_id, exc)
+            return False
+
     def _report_runtime_status(self, feature: DownloadedPythonFeature) -> None:
         status = feature.status_tuple()
         if self._reported_runtime_status.get(feature.feature_id) == status:
@@ -733,6 +742,9 @@ class VehicleControl:
         joystick: JoystickSignal,
         context: dict[str, Any] | None = None,
     ) -> FeatureState:
+        if feature_id == "AEB":
+            return self._update_aeb_feature()
+
         feature = self._feature_runtime(feature_id)
         enabled = self._feature_enabled(feature_id)
         state = feature.update(
@@ -758,10 +770,28 @@ class VehicleControl:
                 error=state.error,
             )
 
-        if feature_id == "AEB":
-            self._sync_aeb_enabled_command(enabled)
-
         return state
+
+    def _update_aeb_feature(self) -> FeatureState:
+        installed = self._feature_installed("AEB")
+        enabled = self._feature_enabled("AEB")
+        if enabled and not installed:
+            self._set_feature_enabled("AEB", False)
+            enabled = False
+
+        self._sync_aeb_enabled_command(enabled)
+        return FeatureState(
+            enabled=enabled,
+            mode="someip-control" if installed else "not-installed",
+            value={
+                "service_id": f"0x{self._aeb_service_id:04X}",
+                "method_id": f"0x{self._aeb_control_method_id:04X}",
+                "cmd": 1 if enabled else 0,
+            },
+            downloaded=installed,
+            applied=installed,
+            error=None if installed else "AEB firmware OTA is not installed",
+        )
 
     def _update_features(
         self,
@@ -800,8 +830,11 @@ class VehicleControl:
 
     def set_feature_enabled(self, feature_id: str, enabled: bool) -> dict:
         with self._lock:
-            if enabled and not self._feature_can_run(feature_id):
-                enabled = False
+            if enabled:
+                if feature_id == "AEB":
+                    enabled = self._feature_installed(feature_id)
+                else:
+                    enabled = self._feature_can_run(feature_id)
             self._set_feature_enabled(feature_id, enabled)
             feature_states = self._update_features(self._snapshot.joystick)
             control_payload = self.build_control_payload(self._snapshot.joystick, feature_states["LKAS"])

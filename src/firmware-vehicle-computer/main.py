@@ -103,7 +103,7 @@ FIRMWARE_VERSION_SERVICE_ID = int(
     os.getenv("FIRMWARE_VERSION_SERVICE_ID", str(DEFAULT_INFO_SERVICE_ID)), 0
 )
 VEHICLE_COMPUTER_VERSION_TARGET = "VehicleComputer"
-VEHICLE_COMPUTER_FIRMWARE_VERSION = os.getenv("VEHICLE_COMPUTER_FIRMWARE_VERSION", "1.5.0")
+VEHICLE_COMPUTER_FIRMWARE_VERSION = os.getenv("VEHICLE_COMPUTER_FIRMWARE_VERSION", "1.5.1")
 FEATURE_VERSION_TARGET = "Feature"
 
 # SOME/IP IDs for Drive Service / Drive method.
@@ -3018,7 +3018,10 @@ def api_server_worker(
 
         def store_item_version_payload(item: dict, record: dict, installed: bool) -> dict:
             package_required = bool(item.get("package_required", True))
-            package_downloaded = bool(record.get("package", {}).get("downloaded"))
+            firmware_only = bool(item.get("downloadable") and not package_required)
+            package_downloaded = bool(record.get("package", {}).get("downloaded")) or (
+                firmware_only and installed
+            )
             package_path = store_feature_package_path(record)
             package_version = python_module_version(package_path)
             firmware_versions = firmware_target_versions(record)
@@ -3065,6 +3068,8 @@ def api_server_worker(
             for item in STORE_CATALOG:
                 record = records[item["id"]]
                 installed = feature_state_store._is_record_installed(item, record)
+                firmware_only = bool(item.get("downloadable") and not item.get("package_required", True))
+                downloaded = bool(record["package"]["downloaded"]) or (firmware_only and installed)
                 version_payload = store_item_version_payload(item, record, installed)
                 items.append(
                     {
@@ -3072,7 +3077,7 @@ def api_server_worker(
                         **version_payload,
                         "purchased": record["purchased"],
                         "enabled": record["enabled"],
-                        "downloaded": record["package"]["downloaded"],
+                        "downloaded": downloaded,
                         "applied": installed,
                         "runtime_error": record["zcu_ota"].get("error") or record["package"]["error"],
                         "ota_progress": ota_manager.progress_for(item["id"]),
@@ -3814,7 +3819,9 @@ def api_server_worker(
             control = vehicle_control.set_feature_enabled(feature_id, enabled)
             effective = feature_state_store.is_feature_enabled(feature_id)
             feature_state = control[feature_id.lower()]
-            if enabled and (not feature_state["downloaded"] or not feature_state["applied"]):
+            if enabled and feature_id == "AEB" and not effective:
+                message = "AEB firmware OTA가 완료되지 않아 활성화할 수 없습니다."
+            elif enabled and (not feature_state["downloaded"] or not feature_state["applied"]):
                 message = f"{feature_id} 파일이 다운로드/적용되지 않아 기본 조종으로 유지됩니다."
             else:
                 message = f"{feature_id} {'enabled' if effective else 'disabled'}"
