@@ -278,6 +278,7 @@ STORE_CATALOG = [
                     "AEB_SENSOR_ECU_OTA_REPO",
                     "HAMES-6th-Overdrive/sensor-ecu",
                 ),
+                "release_patch_filter": 0,
                 "target_dir": "firmware",
 
                 # GitHub Release asset name.
@@ -320,6 +321,7 @@ STORE_CATALOG = [
                     "FRONT_ZCU_OTA_REPO",
                     "HAMES-6th-Overdrive/firmware-front-zcu",
                 ),
+                "release_patch_filter": 0,
                 "target_dir": "firmware",
 
                 # GitHub Release asset name.
