@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from ethernet import build_someip_packet, parse_someip_packet, send_ethernet_message
-from ota import OtaManager
+from ota import OtaManager, SENSOR_CAN_OTA_MAX_DATA_BLOCK_SIZE
 from vehicle_control import FEATURE_IDS, GEAR_D, GEAR_P, VehicleControl
 
 
@@ -167,7 +167,9 @@ FLASHER_BOARD_CONFIGS: dict[str, dict[str, Any]] = {
         "tester_address": int(os.getenv("AEB_SENSOR_ECU_OTA_TESTER_ADDRESS", "0x0E00"), 0),
         "ecu_address": int(os.getenv("AEB_SENSOR_ECU_OTA_ZCU_ADDRESS", "0x0001"), 0),
         "app_addr": int(os.getenv("AEB_SENSOR_ECU_OTA_APP_ADDR", "0x80020000"), 0),
-        "block_size": int(os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_SIZE", "32")),
+        "block_size": int(
+            os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_SIZE", str(SENSOR_CAN_OTA_MAX_DATA_BLOCK_SIZE))
+        ),
         "timeout_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_TIMEOUT_SECONDS", "60")),
         "block_delay_seconds": float(os.getenv("MANUAL_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS", "0")),
         "activate_after_transfer": False,
@@ -243,7 +245,9 @@ STORE_CATALOG = [
                 "tester_address": int(os.getenv("AEB_SENSOR_ECU_OTA_TESTER_ADDRESS", "0x0E00"), 0),
                 "ecu_address": int(os.getenv("AEB_SENSOR_ECU_OTA_ZCU_ADDRESS", "0x0001"), 0),
                 "app_addr": int(os.getenv("AEB_SENSOR_ECU_OTA_APP_ADDR", "0x80020000"), 0),
-                "block_size": int(os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_SIZE", "32")),
+                "block_size": int(
+                    os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_SIZE", str(SENSOR_CAN_OTA_MAX_DATA_BLOCK_SIZE))
+                ),
                 "timeout_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_TIMEOUT_SECONDS", "60")),
                 "block_delay_seconds": float(
                     os.getenv(
