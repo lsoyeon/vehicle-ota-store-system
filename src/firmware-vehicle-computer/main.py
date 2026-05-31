@@ -769,7 +769,7 @@ class FeatureStateStore:
             return data
 
         try:
-            with source_path.open("r", encoding="utf-8") as file:
+            with source_path.open("r", encoding="utf-8-sig") as file:
                 data = json.load(file)
         except (OSError, json.JSONDecodeError):
             logger.warning("feature state is unreadable, using empty state: %s", source_path)

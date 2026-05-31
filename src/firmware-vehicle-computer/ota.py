@@ -1399,7 +1399,7 @@ class OtaManager:
         url = f"https://api.github.com/repos/{repo}/releases/latest"
         try:
             data = self._request_bytes(url, accept="application/vnd.github+json")
-            payload = json.loads(data.decode("utf-8"))
+            payload = json.loads(data.decode("utf-8-sig"))
             if not isinstance(payload, dict) or not payload.get("tag_name"):
                 raise RuntimeError(f"latest release payload is invalid: {repo}")
             return payload
@@ -1421,7 +1421,7 @@ class OtaManager:
 
         url = f"https://api.github.com/repos/{repo}/releases?per_page=100"
         data = self._request_bytes(url, accept="application/vnd.github+json")
-        payload = json.loads(data.decode("utf-8"))
+        payload = json.loads(data.decode("utf-8-sig"))
         if not isinstance(payload, list):
             raise RuntimeError(f"release list payload is invalid: {repo}")
 
@@ -1755,6 +1755,10 @@ class OtaManager:
         return None
 
     @staticmethod
+    def _manifest_path(value: str) -> Path:
+        return Path(value.replace("\\", "/"))
+
+    @staticmethod
     def is_sparse_package_path(path: Path) -> bool:
         if path.is_dir():
             return (path / "manifest.json").exists() or (path / "ota_segments" / "manifest.json").exists()
@@ -1797,7 +1801,7 @@ class OtaManager:
         if manifest_path is None or not manifest_path.exists():
             raise FileNotFoundError(f"manifest.json not found in OTA package: {package_path}")
 
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
 
         virtual_size = self._parse_u32(manifest.get("virtualSize"), "virtualSize")
         virtual_crc32 = self._parse_u32(
@@ -1848,7 +1852,7 @@ class OtaManager:
             crc32 = self._parse_u32(crc_value, f"segments[{idx}].crc32") if crc_value is not None else None
 
             file_name = str(raw_segment.get("file") or f"segment{segment_index}.bin")
-            file_path = Path(file_name)
+            file_path = self._manifest_path(file_name)
             candidates: list[Path]
             if file_path.is_absolute():
                 candidates = [file_path]
