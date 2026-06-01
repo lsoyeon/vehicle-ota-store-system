@@ -380,74 +380,7 @@ STORE_CATALOG = [
                 "release_repo": "HAMES-6th-Overdrive/FVSA",
                 "download_file": "FVSA.py",
                 "target_dir": "features",
-            },
-            {
-                "id": "sensor_ecu_firmware",
-                "type": "doip_sensor_can_ota",
-                "target": "sensor-ecu",
-                "release_repo": os.getenv(
-                    "FVSA_SENSOR_ECU_OTA_REPO",
-                    os.getenv("AEB_SENSOR_ECU_OTA_REPO", "HAMES-6th-Overdrive/sensor-ecu"),
-                ),
-                "release_patch_filter": 0,
-                "target_dir": "firmware",
-                "package_file": os.getenv(
-                    "FVSA_SENSOR_ECU_OTA_PACKAGE_FILE",
-                    os.getenv("AEB_SENSOR_ECU_OTA_PACKAGE_FILE", "sensor-ecu_ota_package.zip"),
-                ),
-                "ecu_ip": os.getenv("FVSA_SENSOR_ECU_OTA_ZCU_IP", os.getenv("AEB_SENSOR_ECU_OTA_ZCU_IP", "192.168.10.2")),
-                "doip_port": int(os.getenv("FVSA_SENSOR_ECU_OTA_DOIP_PORT", os.getenv("AEB_SENSOR_ECU_OTA_DOIP_PORT", "13401"))),
-                "tester_address": int(
-                    os.getenv(
-                        "FVSA_SENSOR_ECU_OTA_TESTER_ADDRESS",
-                        os.getenv("AEB_SENSOR_ECU_OTA_TESTER_ADDRESS", "0x0E00"),
-                    ),
-                    0,
-                ),
-                "ecu_address": int(
-                    os.getenv(
-                        "FVSA_SENSOR_ECU_OTA_ZCU_ADDRESS",
-                        os.getenv("AEB_SENSOR_ECU_OTA_ZCU_ADDRESS", "0x0001"),
-                    ),
-                    0,
-                ),
-                "app_addr": int(
-                    os.getenv(
-                        "FVSA_SENSOR_ECU_OTA_APP_ADDR",
-                        os.getenv("AEB_SENSOR_ECU_OTA_APP_ADDR", "0x80020000"),
-                    ),
-                    0,
-                ),
-                "block_size": int(os.getenv("FVSA_SENSOR_ECU_OTA_BLOCK_SIZE", os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_SIZE", "32"))),
-                "timeout_seconds": float(
-                    os.getenv(
-                        "FVSA_SENSOR_ECU_OTA_TIMEOUT_SECONDS",
-                        os.getenv("AEB_SENSOR_ECU_OTA_TIMEOUT_SECONDS", "120"),
-                    )
-                ),
-                "ready_check_timeout_seconds": float(
-                    os.getenv(
-                        "FVSA_SENSOR_ECU_OTA_READY_TIMEOUT_SECONDS",
-                        os.getenv("AEB_SENSOR_ECU_OTA_READY_TIMEOUT_SECONDS", "120"),
-                    )
-                ),
-                "block_delay_seconds": float(
-                    os.getenv(
-                        "FVSA_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS",
-                        os.getenv(
-                            "AEB_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS",
-                            os.getenv("MANUAL_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS", "0"),
-                        ),
-                    )
-                ),
-                "progress_update_interval_blocks": int(
-                    os.getenv(
-                        "FVSA_SENSOR_ECU_OTA_PROGRESS_INTERVAL_BLOCKS",
-                        os.getenv("AEB_SENSOR_ECU_OTA_PROGRESS_INTERVAL_BLOCKS", "50"),
-                    )
-                ),
-                "activate_after_transfer": False,
-            },
+            }
         ],
     },
     {
@@ -556,19 +489,8 @@ def ota_target_display_name(target: Any) -> str:
     }.get(str(target or "zcu"), str(target or "zcu"))
 
 
-def firmware_version_snapshot_key(target_name: str) -> str:
-    return {
-        "ZCU": "ZCU",
-        "Front ZCU": "ZCU",
-        "Sensor ECU": "SensorECU",
-        "Drive ECU": "MotorECU",
-    }.get(target_name, target_name)
-
-
-def firmware_target_versions(record: dict[str, Any], *, require_applied: bool = False) -> dict[str, str]:
+def firmware_target_versions(record: dict[str, Any]) -> dict[str, str]:
     zcu_ota = record.get("zcu_ota", {})
-    if require_applied and (not isinstance(zcu_ota, dict) or not zcu_ota.get("applied")):
-        return {}
     raw_versions = zcu_ota.get("versions", {}) if isinstance(zcu_ota, dict) else {}
     versions: dict[str, str] = {}
     if isinstance(raw_versions, dict):
@@ -745,13 +667,11 @@ class FeatureStateStore:
         path: Path,
         *,
         ota_manager: OtaManager,
-        firmware_versions: Any | None = None,
         legacy_path: Path | None = None,
     ) -> None:
         self.path = path
         self.legacy_path = legacy_path
         self.ota_manager = ota_manager
-        self.firmware_versions = firmware_versions
         self._lock = threading.Lock()
 
     def _empty(self) -> dict:
@@ -779,16 +699,10 @@ class FeatureStateStore:
                 package_action = self.ota_manager.python_package_action(item)
             except ValueError:
                 package_action = None
-        firmware_actions = [
-            action
+        zcu_action = self.ota_manager.zcu_flash_action(item) if any(
+            action.get("type") == "doip_uds_flash"
             for action in self.ota_manager.actions_for(item)
-            if action.get("type") in ("doip_uds_flash", "doip_sensor_can_ota")
-        ]
-        zcu_action = (
-            self.ota_manager.zcu_flash_action(item)
-            if any(action.get("type") == "doip_uds_flash" for action in firmware_actions)
-            else firmware_actions[0] if firmware_actions else None
-        )
+        ) else None
         return {
             "purchased": False,
             "enabled": False,
@@ -935,15 +849,14 @@ class FeatureStateStore:
             if isinstance(raw_ota, dict):
                 record["zcu_ota"].update(
                     {
-                        "required": bool(raw_ota.get("required", record["zcu_ota"]["required"]))
-                        or bool(record["zcu_ota"]["required"]),
+                        "required": bool(raw_ota.get("required", False)),
                         "downloaded": bool(raw_ota.get("downloaded", False)),
                         "applied": bool(raw_ota.get("applied", False)),
                         "path": raw_ota.get("path"),
-                        "action_id": raw_ota.get("action_id") or record["zcu_ota"]["action_id"],
-                        "action_type": raw_ota.get("action_type") or record["zcu_ota"]["action_type"],
-                        "target": raw_ota.get("target") or record["zcu_ota"]["target"],
-                        "repo": raw_ota.get("repo") or record["zcu_ota"]["repo"],
+                        "action_id": raw_ota.get("action_id", record["zcu_ota"]["action_id"]),
+                        "action_type": raw_ota.get("action_type", record["zcu_ota"]["action_type"]),
+                        "target": raw_ota.get("target", record["zcu_ota"]["target"]),
+                        "repo": raw_ota.get("repo", record["zcu_ota"]["repo"]),
                         "version": raw_ota.get("version"),
                         "release_tag": raw_ota.get("release_tag"),
                         "release_url": raw_ota.get("release_url"),
@@ -958,17 +871,11 @@ class FeatureStateStore:
 
             raw_payloads = raw_record.get("firmware_payloads", {})
             if isinstance(raw_payloads, dict):
-                normalized_payloads = {}
-                for action_id, payload in raw_payloads.items():
-                    if not isinstance(payload, dict):
-                        continue
-                    normalized_payload = dict(payload)
-                    if normalized_payload.get("downloaded") and not normalized_payload.get("downloaded_version"):
-                        normalized_payload["downloaded_version"] = normalized_payload.get("version")
-                    if not normalized_payload.get("applied"):
-                        normalized_payload["version"] = None
-                    normalized_payloads[str(action_id)] = normalized_payload
-                record["firmware_payloads"] = normalized_payloads
+                record["firmware_payloads"] = {
+                    str(action_id): dict(payload)
+                    for action_id, payload in raw_payloads.items()
+                    if isinstance(payload, dict)
+                }
 
             if catalog_item.get("downloadable") and not catalog_item.get("package_required", True):
                 record["package"].update(
@@ -1044,69 +951,6 @@ class FeatureStateStore:
             for action in self.ota_manager.actions_for(item)
             if action.get("type") in ("doip_uds_flash", "doip_sensor_can_ota")
         ]
-
-    def _known_firmware_versions_unlocked(self, data: dict) -> dict[str, str]:
-        versions: dict[str, str] = {}
-
-        def remember(target: Any, version: Any) -> None:
-            target_name = ota_target_display_name(target)
-            normalized = firmware_version(str(version)) or str(version or "")
-            if not normalized:
-                return
-            if target_name not in versions or firmware_version_gt(normalized, versions[target_name]):
-                versions[target_name] = normalized
-
-        for record in data.get("items", {}).values():
-            if not isinstance(record, dict):
-                continue
-            payloads = record.get("firmware_payloads", {})
-            if isinstance(payloads, dict):
-                for payload in payloads.values():
-                    if not isinstance(payload, dict) or not payload.get("applied"):
-                        continue
-                    remember(payload.get("target"), payload.get("version") or payload.get("downloaded_version"))
-            for target, version in firmware_target_versions(record, require_applied=True).items():
-                remember(target, version)
-        return versions
-
-    def _live_firmware_version(self, target_name: str) -> str | None:
-        if self.firmware_versions is None:
-            return None
-        try:
-            snapshot = self.firmware_versions.snapshot()
-        except Exception:
-            return None
-        keys = (
-            target_name,
-            firmware_version_snapshot_key(target_name),
-            target_name.replace(" ", ""),
-        )
-        for key in keys:
-            value = snapshot.get(key)
-            normalized = firmware_version(str(value)) or None
-            if normalized:
-                return normalized
-        return None
-
-    def _current_firmware_version_unlocked(self, data: dict, record: dict, target_name: str) -> str | None:
-        live_version = self._live_firmware_version(target_name)
-        if live_version:
-            return live_version
-        local_versions = firmware_target_versions(record, require_applied=True)
-        known_versions = self._known_firmware_versions_unlocked(data)
-        zcu_ota = record.get("zcu_ota", {})
-        zcu_version = None
-        if (
-            isinstance(zcu_ota, dict)
-            and zcu_ota.get("applied")
-            and ota_target_display_name(zcu_ota.get("target", "zcu")) == target_name
-        ):
-            zcu_version = zcu_ota.get("version")
-        return (
-            known_versions.get(target_name)
-            or local_versions.get(target_name)
-            or zcu_version
-        )
 
     def _is_record_installed(self, item: dict, record: dict) -> bool:
         if item.get("kind") == "theme":
@@ -1193,10 +1037,7 @@ class FeatureStateStore:
         if not actions:
             return
         pending = data.setdefault("pending_ota", {"to_install": [], "to_update": [], "checked_at": None})
-        firmware_versions = {
-            **firmware_target_versions(record, require_applied=True),
-            **self._known_firmware_versions_unlocked(data),
-        }
+        firmware_versions = firmware_target_versions(record)
         for action in actions:
             target_name = ota_target_display_name(action.get("target", "zcu"))
             latest_version = (
@@ -1393,6 +1234,7 @@ class FeatureStateStore:
                             self._upsert_pending_unlocked(next_pending, "to_update", update_item)
 
                 zcu = record["zcu_ota"]
+                firmware_versions = firmware_target_versions(record)
                 for action in self._zcu_actions(item):
                     if not zcu.get("applied"):
                         continue
@@ -1405,9 +1247,7 @@ class FeatureStateStore:
                         continue
 
                     latest_version = firmware_version(str(release.get("tag_name") or "")) or "0.0.0"
-                    current_version = firmware_version(
-                        self._current_firmware_version_unlocked(data, record, target_name)
-                    )
+                    current_version = firmware_version(firmware_versions.get(target_name) or zcu.get("version"))
                     if not firmware_version_gt(latest_version, current_version):
                         zcu["checked_at"] = utc_now()
                         zcu["error"] = None
@@ -1436,10 +1276,7 @@ class FeatureStateStore:
         if not actions or not record["zcu_ota"].get("applied"):
             return
         pending = data.setdefault("pending_ota", {"to_install": [], "to_update": [], "checked_at": None})
-        firmware_versions = {
-            **firmware_target_versions(record, require_applied=True),
-            **self._known_firmware_versions_unlocked(data),
-        }
+        firmware_versions = firmware_target_versions(record)
         for action in actions:
             target_name = ota_target_display_name(action.get("target", "zcu"))
             latest_version = (
@@ -1516,7 +1353,7 @@ class FeatureStateStore:
                             "success": success,
                             "version": {
                                 FEATURE_VERSION_TARGET: record.get("version"),
-                                **firmware_target_versions(record, require_applied=True),
+                                **firmware_target_versions(record),
                             },
                             "error": zcu.get("error") if not success else None,
                         }
@@ -1580,7 +1417,7 @@ class FeatureStateStore:
                     prepared.update(
                         {
                             "downloaded_asset_name": payload.get("asset_name"),
-                            "downloaded_version": payload.get("downloaded_version") or payload.get("version"),
+                            "downloaded_version": payload.get("version"),
                             "downloaded_release_tag": payload.get("release_tag"),
                             "downloaded_release_url": payload.get("release_url"),
                         }
@@ -1614,17 +1451,8 @@ class FeatureStateStore:
             action["progress_start"] = int(index * 100 / firmware_count)
             action["progress_end"] = int((index + 1) * 100 / firmware_count)
             target_name = ota_target_display_name(action.get("target", "zcu"))
-            with self._lock:
-                data = self._load_unlocked()
-                record = data["items"][feature_id]
-                current_firmware_version = self._current_firmware_version_unlocked(data, record, target_name)
             try:
-                zcu_result = self.ota_manager.flash_firmware_payload(
-                    item,
-                    action,
-                    current_version=current_firmware_version,
-                    force=True,
-                )
+                zcu_result = self.ota_manager.flash_firmware_payload(item, action, force=True)
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 self.ota_manager.update_progress(
@@ -1655,7 +1483,7 @@ class FeatureStateStore:
                     else:
                         self._remove_feature_pending_unlocked(data, feature_id)
                     self._save_unlocked(data)
-                    version_payload = firmware_target_versions(record, require_applied=True)
+                    version_payload = firmware_target_versions(record)
                 firmware_failed = True
                 results.append(
                     {
@@ -1677,7 +1505,6 @@ class FeatureStateStore:
                 if not isinstance(firmware_versions, dict):
                     firmware_versions = {}
                     zcu["versions"] = firmware_versions
-                previous_target_version = firmware_versions.get(target_name)
                 zcu["required"] = True
                 zcu["downloaded"] = zcu_result.downloaded
                 zcu["applied"] = zcu_result.applied
@@ -1691,14 +1518,12 @@ class FeatureStateStore:
                 zcu["action_type"] = zcu_result.action_type
                 zcu["target"] = zcu_result.target
                 zcu["repo"] = action.get("release_repo") or item.get("release_repo")
+                zcu["version"] = zcu_result.version
                 zcu["release_tag"] = zcu_result.release_tag
                 zcu["release_url"] = zcu_result.release_url
                 zcu["asset_name"] = zcu_result.asset_name or zcu.get("asset_name")
-                applied_version = None
-                if zcu_result.applied and zcu_result.version:
+                if zcu_result.version:
                     normalized_version = firmware_version(zcu_result.version) or zcu_result.version
-                    applied_version = normalized_version
-                    zcu["version"] = normalized_version
                     firmware_versions[target_name] = normalized_version
                     zcu["versions"] = firmware_versions
                     if not bool(item.get("package_required", True)):
@@ -1716,8 +1541,7 @@ class FeatureStateStore:
                         "action_type": zcu_result.action_type,
                         "target": zcu_result.target,
                         "repo": action.get("release_repo") or item.get("release_repo"),
-                        "version": applied_version or previous_target_version,
-                        "downloaded_version": zcu_result.version if zcu_result.downloaded else None,
+                        "version": zcu_result.version,
                         "release_tag": zcu_result.release_tag,
                         "release_url": zcu_result.release_url,
                         "asset_name": zcu_result.asset_name,
@@ -1733,7 +1557,7 @@ class FeatureStateStore:
                 self._save_unlocked(data)
                 version_payload = {
                     FEATURE_VERSION_TARGET: record.get("version"),
-                    **firmware_target_versions(record, require_applied=True),
+                    **firmware_target_versions(record),
                 }
             results.append(
                 {
@@ -1893,9 +1717,12 @@ class FeatureStateStore:
             if not isinstance(firmware_versions, dict):
                 firmware_versions = {}
                 zcu["versions"] = firmware_versions
-            previous_target_version = firmware_versions.get(target_name)
             try:
-                current_firmware_version = self._current_firmware_version_unlocked(data, record, target_name)
+                current_firmware_version = (
+                    firmware_versions.get(target_name)
+                    or zcu.get("version")
+                    or record.get("version")
+                )
                 if run_flash:
                     zcu_result = self.ota_manager.flash_firmware_payload(
                         item,
@@ -1934,14 +1761,12 @@ class FeatureStateStore:
             zcu["action_type"] = zcu_result.action_type
             zcu["target"] = zcu_result.target
             zcu["repo"] = action.get("release_repo") or item.get("release_repo")
+            zcu["version"] = zcu_result.version
             zcu["release_tag"] = zcu_result.release_tag
             zcu["release_url"] = zcu_result.release_url
             zcu["asset_name"] = zcu_result.asset_name or zcu.get("asset_name")
-            applied_version = None
-            if zcu_result.applied and zcu_result.version:
+            if zcu_result.version:
                 normalized_version = firmware_version(zcu_result.version) or zcu_result.version
-                applied_version = normalized_version
-                zcu["version"] = normalized_version
                 firmware_versions[target_name] = normalized_version
                 zcu["versions"] = firmware_versions
                 if not package_required:
@@ -1949,8 +1774,8 @@ class FeatureStateStore:
             zcu["checked_at"] = zcu_result.checked_at
             if zcu_result.downloaded_at:
                 zcu["downloaded_at"] = zcu_result.downloaded_at
-            if zcu_result.updated and zcu_result.applied:
-                zcu["applied_at"] = utc_now()
+            if zcu_result.updated:
+                zcu["applied_at"] = utc_now() if zcu_result.applied else None
             zcu["error"] = zcu_result.error
             firmware_payloads[str(zcu_result.action_id)] = {
                 "downloaded": zcu_result.downloaded,
@@ -1959,8 +1784,7 @@ class FeatureStateStore:
                 "action_type": zcu_result.action_type,
                 "target": zcu_result.target,
                 "repo": action.get("release_repo") or item.get("release_repo"),
-                "version": applied_version or previous_target_version,
-                "downloaded_version": zcu_result.version if zcu_result.downloaded else None,
+                "version": zcu_result.version,
                 "release_tag": zcu_result.release_tag,
                 "release_url": zcu_result.release_url,
                 "asset_name": zcu_result.asset_name,
@@ -2103,7 +1927,7 @@ class FeatureStateStore:
                 continue
             item_versions = {FEATURE_VERSION_TARGET: record["version"]}
             if record["zcu_ota"].get("applied"):
-                item_versions.update(firmware_target_versions(record, require_applied=True))
+                item_versions.update(firmware_target_versions(record))
             versions[feature_id] = item_versions
         return versions
 
@@ -3262,7 +3086,7 @@ def api_server_worker(
             package_downloaded = bool(record.get("package", {}).get("downloaded"))
             package_path = store_feature_package_path(record)
             package_version = python_module_version(package_path)
-            firmware_versions = firmware_target_versions(record, require_applied=True)
+            firmware_versions = firmware_target_versions(record)
             firmware_version_values = [version for version in firmware_versions.values() if version]
             firmware_display_version = (
                 firmware_version_values[0]
@@ -3281,8 +3105,7 @@ def api_server_worker(
 
             downloaded_version = None
             if package_downloaded:
-                if package_required or installed:
-                    downloaded_version = package_version or recorded_version or None
+                downloaded_version = package_version or recorded_version or None
             installed_version = downloaded_version if installed else None
             display_version = installed_version or downloaded_version or latest_version or "1.0.0"
 
@@ -3344,7 +3167,11 @@ def api_server_worker(
             payload["aeb_triggered"] = bool(aeb_alert["active"]) or bool(control.get("aeb", {}).get("value", {}).get("alarm"))
             payload["aeb_triggered_at"] = aeb_alert["triggered_at"]
             payload["aeb_trigger_count"] = aeb_alert["count"]
-            payload["firmware_versions"] = firmware_versions.snapshot()
+            board_versions = firmware_versions.snapshot()
+            aeb_zcu = feature_state_store.feature_record("AEB")["zcu_ota"]
+            if aeb_zcu.get("applied") and aeb_zcu.get("version"):
+                board_versions["ZCU"] = firmware_version(aeb_zcu["version"]) or board_versions.get("ZCU", "-")
+            payload["firmware_versions"] = board_versions
             payload["pending_ota"] = feature_state_store.pending_ota()
             payload["available_themes"] = (
                 ["luffy"] if feature_state_store.feature_record("LUFFY_THEME")["purchased"] else []
@@ -4207,7 +4034,6 @@ def build_supervisor() -> Supervisor:
     feature_state_store = FeatureStateStore(
         FEATURE_STATE_FILE,
         ota_manager=ota_manager,
-        firmware_versions=firmware_versions,
         legacy_path=LEGACY_PURCHASES_FILE,
     )
     vehicle_control = VehicleControl(

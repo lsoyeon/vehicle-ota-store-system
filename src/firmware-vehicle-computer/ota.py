@@ -685,14 +685,6 @@ def release_version_tuple(tag: str | None) -> tuple[int, int, int] | None:
     return int(major), int(minor), int(patch)
 
 
-def firmware_version_at_least(current: str | None, minimum: str | None) -> bool:
-    current_tuple = release_version_tuple(current)
-    minimum_tuple = release_version_tuple(minimum)
-    if current_tuple is None or minimum_tuple is None:
-        return False
-    return current_tuple >= minimum_tuple
-
-
 class OtaManager:
     """Middle layer for downloadable vehicle software."""
 
@@ -1136,62 +1128,6 @@ class OtaManager:
             error=None if success else failed_message,
         )
 
-    def firmware_current_result(
-        self,
-        feature_id: str,
-        action: dict[str, Any],
-        *,
-        current_version: str | None,
-        target_version: str | None,
-        path: Path | None,
-        release_tag: str | None,
-        release_url: str | None,
-        asset_name: str | None,
-        checked_at: str | None = None,
-    ) -> OtaPackageResult:
-        action_id = str(action.get("id", "firmware"))
-        action_type = str(action.get("type", "firmware"))
-        target_name = str(action.get("target", "firmware"))
-        checked_at = checked_at or utc_now()
-        _, percent_end = action_progress_span(action)
-        current_clean = clean_firmware_version(current_version)
-        target_clean = clean_firmware_version(target_version)
-        result_version = current_clean or target_clean
-        release_matches_current = bool(current_clean and target_clean and current_clean == target_clean)
-        existing_path = path if path is not None and path.exists() else None
-        existing_size = existing_path.stat().st_size if existing_path is not None else None
-        relation = "current" if release_matches_current else "newer"
-
-        self.update_progress(
-            feature_id,
-            action_id=action_id,
-            action_type=action_type,
-            target=target_name,
-            phase="complete",
-            status="current",
-            percent=percent_end,
-            message=f"{target_name} firmware already {relation}",
-            active=False,
-            bytes_downloaded=existing_size,
-            total_bytes=existing_size,
-        )
-        return OtaPackageResult(
-            feature_id=feature_id,
-            action_id=action_id,
-            action_type=action_type,
-            target=target_name,
-            downloaded=existing_path is not None,
-            applied=True,
-            updated=False,
-            path=existing_path,
-            version=result_version,
-            release_tag=release_tag if release_matches_current else None,
-            release_url=release_url if release_matches_current else None,
-            asset_name=asset_name if existing_path is not None else None,
-            downloaded_at=None,
-            checked_at=checked_at,
-        )
-
     def flash_firmware_payload(
         self,
         catalog_item: dict[str, Any],
@@ -1208,19 +1144,6 @@ class OtaManager:
         percent_start, percent_end = action_progress_span(action)
         existing_context = self._existing_firmware_action_context(catalog_item, action)
         if existing_context is not None:
-            existing_version = str(existing_context["version"])
-            if firmware_version_at_least(current_version, existing_version):
-                return self.firmware_current_result(
-                    feature_id,
-                    action,
-                    current_version=current_version,
-                    target_version=existing_version,
-                    path=existing_context["path"],
-                    release_tag=str(existing_context["release_tag"]) if existing_context["release_tag"] else None,
-                    release_url=str(existing_context["release_url"]) if existing_context["release_url"] else None,
-                    asset_name=str(existing_context["asset_name"]),
-                    checked_at=checked_at,
-                )
             return self.flash_firmware_file(
                 existing_context["path"],
                 feature_id,
@@ -1255,18 +1178,6 @@ class OtaManager:
         context = self._firmware_action_context(catalog_item, action)
         bin_path = context["path"]
         version = str(context["version"])
-        if firmware_version_at_least(current_version, version):
-            return self.firmware_current_result(
-                feature_id,
-                action,
-                current_version=current_version,
-                target_version=version,
-                path=bin_path,
-                release_tag=str(context["release_tag"]) if context["release_tag"] else None,
-                release_url=str(context["release_url"]) if context["release_url"] else None,
-                asset_name=str(context["asset_name"]),
-                checked_at=checked_at,
-            )
         if not force and bin_path.exists() and clean_firmware_version(current_version) == version:
             return self.flash_firmware_file(
                 bin_path,
