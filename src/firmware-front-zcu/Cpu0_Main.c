@@ -66,9 +66,9 @@
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
 #define LED_500MS_PIN (&IfxPort_P00_6)
-#define APP_FRONTZCU_VERSION "1.0.0"
+#define APP_FRONTZCU_VERSION "2.0.0"
 
-#define SENSOR_OTA_DOIP_INIT_DELAY_MS      8000U
+#define SENSOR_OTA_DOIP_INIT_DELAY_MS      5000U
 #define SENSOR_OTA_DOIP_TASK_STACK_SIZE    (configMINIMAL_STACK_SIZE)
 #define SENSOR_OTA_DOIP_TASK_PRIORITY      (tskIDLE_PRIORITY + 1U)
 
@@ -106,7 +106,6 @@ void core0_main(void)
     IfxScuWdt_disableSafetyWatchdog(IfxScuWdt_getSafetyWatchdogPassword());
     
     /* SOTA 초기화: SWAPEN disabled이면 next entry에 Bank A marker를 기록하고 SWAPEN enable 후 reset */
-    AppDebug_Init();
     SOTA_InitialSetup();
     AppDebug_Init();
     

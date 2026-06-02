@@ -195,7 +195,7 @@ typedef struct AppCanTpChannel {
 
 static AppCanHwContext g_can_hw;
 static QueueHandle_t g_internal_rx_queue = NULL;
-#define APP_CAN_TX_STUCK_LIMIT_MS   20u
+#define APP_CAN_TX_STUCK_LIMIT_MS   1u
 
 static volatile uint32_t g_tx_in_progress_ticks = 0u;
 volatile uint32_t g_tx_stuck_recover_count = 0u;
@@ -236,11 +236,22 @@ static volatile uint32_t g_tx_sent_count = 0u;
 static volatile uint32_t g_tx_busy_count = 0u;
 
 /* TC375 Lite Kit CAN0 Node0 pin mapping: TX P20.8, RX P20.7, STB P20.6 LOW */
+
+#if 0
+static const IfxCan_Can_Pins g_app_can_pins = {
+    &IfxCan_TXD10_P00_0_OUT, IfxPort_OutputMode_pushPull,
+    &IfxCan_RXD10A_P00_1_IN, IfxPort_InputMode_noPullDevice,
+    IfxPort_PadDriver_cmosAutomotiveSpeed1
+};
+#endif
+
+
 static const IfxCan_Can_Pins g_app_can_pins = {
     &IfxCan_TXD00_P20_8_OUT, IfxPort_OutputMode_pushPull,
     &IfxCan_RXD00B_P20_7_IN, IfxPort_InputMode_noPullDevice,
     IfxPort_PadDriver_cmosAutomotiveSpeed1
 };
+
 
 /* ============================================================
  * Private prototypes
@@ -870,7 +881,12 @@ static void AppCan_InitTransceiver(void)
 
 static void AppCan_InitModule(void)
 {
+#if 0
+    IfxCan_Can_initModuleConfig(&g_can_hw.can_config, &MODULE_CAN1);
+#endif
+
     IfxCan_Can_initModuleConfig(&g_can_hw.can_config, &MODULE_CAN0);
+
     IfxCan_Can_initModule(&g_can_hw.can_module, &g_can_hw.can_config);
 }
 
