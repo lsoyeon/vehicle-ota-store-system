@@ -4,7 +4,7 @@
 
 # 🚘 Forward Vehicle Start Alarm System
 
-Camera ECU & HPC 기반 전방 차량 출발 알림 시스템
+ToF Sensor ECU · ZCU · HPC 기반 전방 차량 출발 알림 시스템
 
 </div>
 
@@ -13,30 +13,38 @@ Camera ECU & HPC 기반 전방 차량 출발 알림 시스템
 # 📌 Overview
 
 본 프로젝트는 차량 정차 상황에서
-전방 차량의 출발 여부를 감지하여 운전자에게 알림을 제공하는
+전방 차량과의 거리 변화를 감지하여
+운전자에게 출발 알림을 제공하는
 FVSA(Forward Vehicle Start Alarm) 시스템 구현 프로젝트입니다.
 
-Camera ECU에서 실시간 영상을 촬영하고
-Ethernet 통신을 통해 HPC(High Performance Computer)로 프레임을 전송합니다.
+Sensor ECU에서는 ToF(Time of Flight) 센서를 통해
+전방 차량과의 거리 데이터를 측정합니다.
 
-HPC에서는 OpenCV 기반 객체 추적 및 움직임 분석을 수행하여
-전방 차량의 이동 여부를 판단하고 운전자에게 알림을 제공합니다.
+측정된 데이터는 CAN 통신을 통해
+ZCU(Zonal Control Unit)로 전달되며,
+ZCU는 수신한 데이터를 Ethernet 통신을 통해
+HPC(High Performance Computer)로 전달합니다.
 
-SDV(Software Defined Vehicle) 환경 및
-Zonal Architecture 구조를 고려하여 설계되었습니다.
+HPC에서는 거리 변화 데이터를 분석하여
+전방 차량의 출발 여부를 판단하고
+운전자에게 경고를 제공합니다.
+
+SDV(Software Defined Vehicle) 및
+Zonal Architecture 구조를 기반으로 설계되었습니다.
 
 ---
 
 # 🎯 Main Features
 
-* 📷 Camera ECU 기반 영상 수집
-* 🌐 Ethernet 기반 프레임 전송
-* 🚗 전방 차량 인식
-* 📍 차량 움직임 추적
+* 📡 ToF 센서 기반 거리 측정
+* 🚌 CAN 기반 ECU 통신
+* 🌐 Ethernet 기반 ZCU-HPC 데이터 전송
+* 🚗 전방 차량 거리 변화 감지
+* 📍 실시간 거리 분석
 * 🚨 전방 차량 출발 알림
-* 🧠 HPC 기반 영상 처리
-* ⚡ 실시간 객체 분석
-* 🔄 ECU 간 네트워크 통신
+* 🧠 HPC 기반 판단 로직 수행
+* ⚡ 실시간 데이터 처리
+* 🔄 Zonal Architecture 기반 통신 구조
 
 ---
 
@@ -44,16 +52,22 @@ Zonal Architecture 구조를 고려하여 설계되었습니다.
 
 ```plaintext
 ┌─────────────────┐
-│   Camera ECU    │
-│  (Raspberry Pi) │
+│   Sensor ECU    │
+│   ToF Sensor    │
+└────────┬────────┘
+         │
+         │ CAN
+         ▼
+┌─────────────────┐
+│       ZCU       │
+│ CAN ↔ Ethernet  │
 └────────┬────────┘
          │
          │ Ethernet
          ▼
 ┌─────────────────┐
 │       HPC       │
-│ Vehicle Detect  │
-│ Motion Tracking │
+│ Distance Analyze│
 │  FVSA Control   │
 └────────┬────────┘
          │
@@ -71,18 +85,19 @@ Zonal Architecture 구조를 고려하여 설계되었습니다.
 ## Hardware
 
 * Raspberry Pi
-* Camera Module
+* ToF Sensor
+* ZCU Platform
 * Vehicle Platform
 
 ## Software
 
 * Python
-* OpenCV
 * Linux (Ubuntu)
 * Socket Programming
 
 ## Communication
 
+* CAN
 * Ethernet TCP/IP
 
 ---
@@ -91,11 +106,11 @@ Zonal Architecture 구조를 고려하여 설계되었습니다.
 
 ```bash
 FVSA/
-├── camera_ecu/        # Camera ECU source
+├── sensor_ecu/        # Sensor ECU source
+├── zcu/               # ZCU communication source
 ├── hpc/               # HPC processing source
-├── vehicle_detection/ # Vehicle detection algorithms
-├── tracking/          # Motion tracking logic
-├── communication/     # Ethernet communication
+├── distance_analysis/ # Distance analysis logic
+├── communication/     # CAN & Ethernet communication
 ├── utils/             # Utility functions
 ├── docs/              # Documents
 └── README.md
@@ -105,32 +120,30 @@ FVSA/
 
 # 🚀 How It Works
 
-1. Camera ECU에서 실시간 영상 촬영
-2. Ethernet 통신을 통해 HPC로 프레임 전송
-3. HPC에서 전방 차량 검출 수행
-4. 객체 움직임 분석 수행
-5. 차량 출발 여부 판단
+1. Sensor ECU에서 ToF 센서를 통해 거리 데이터 측정
+2. CAN 통신을 통해 ZCU로 데이터 전송
+3. ZCU에서 Ethernet 기반으로 HPC에 데이터 전달
+4. HPC에서 거리 변화 분석 수행
+5. 전방 차량 출발 여부 판단
 6. 운전자에게 경고 및 알림 제공
 
 ---
 
-# 🚗 Vehicle Detection Pipeline
+# 📡 Distance Analysis Pipeline
 
 ```plaintext
-Camera Input
-      ↓
-Frame Streaming
-      ↓
-Grayscale Conversion
-      ↓
-Object Detection
-      ↓
-Vehicle Tracking
-      ↓
-Motion Analysis
-      ↓
-Movement Decision
-      ↓
+ToF Distance Input
+        ↓
+CAN Transmission
+        ↓
+ZCU Data Routing
+        ↓
+Ethernet Streaming
+        ↓
+Distance Analysis
+        ↓
+Vehicle Movement Decision
+        ↓
 Driver Alert
 ```
 
@@ -155,10 +168,16 @@ pip install -r requirements.txt
 
 # ▶️ Run
 
-## Camera ECU
+## Sensor ECU
 
 ```bash
-python camera_sender.py
+python sensor_sender.py
+```
+
+## ZCU
+
+```bash
+python zcu_gateway.py
 ```
 
 ## HPC
@@ -171,30 +190,31 @@ python main.py
 
 # 📸 Demo
 
-* Real-time vehicle detection
-* Forward vehicle movement tracking
-* Ethernet frame streaming
+* Real-time ToF distance measurement
+* CAN-based ECU communication
+* Ethernet data streaming
+* Distance change analysis
 * Driver warning visualization
 
 ---
 
 # 📈 Expected Results
 
-* 안정적인 전방 차량 검출
-* 실시간 움직임 분석
+* 안정적인 거리 측정
+* 실시간 거리 변화 분석
 * 신속한 차량 출발 감지
 * 운전자 반응 시간 향상
-* ECU 간 안정적인 데이터 전송
+* CAN/Ethernet 기반 안정적인 데이터 전송
 
 ---
 
 # 🔥 Future Work
 
-* 딥러닝 기반 객체 인식 적용
-* 거리 추정 기능 추가
-* CAN 통신 연동
+* CAN FD 적용
+* 센서 융합 시스템 적용
 * OTA 기반 업데이트 시스템
 * SDV 플랫폼 확장
+* AI 기반 상황 판단 기능 추가
 
 ---
 
