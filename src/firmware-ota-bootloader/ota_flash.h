@@ -1,0 +1,119 @@
+#ifndef OTA_FLASH_H
+#define OTA_FLASH_H
+
+#include "Ifx_Types.h"
+#include "IfxFlash.h"
+#include "IfxScuWdt.h"
+#include "IfxScuRcu.h"
+
+/* ── 주소 정의 ──────────────────────────────────────────────── */
+#define OTA_FLAG_ADDR       0xAF000000UL    /* DFLASH 플래그 저장 위치 */
+#define OTA_FLAG_MAGIC      0xDEADBEEFUL   /* OTA 모드 진입 식별값    */
+
+#define BOOTLOADER_SIZE     0x00020000UL
+
+#define BANK_A_BASE         0x80000000UL
+#define BANK_B_BASE         0x80300000UL
+
+#define BANK_A_START        (BANK_A_BASE + BOOTLOADER_SIZE)  /* 0x80020000 */
+#define BANK_B_START        (BANK_B_BASE + BOOTLOADER_SIZE)  /* 0x80320000 */
+
+#define BANK_A_SIZE         (0x00300000UL - BOOTLOADER_SIZE) /* 0x002E0000 */
+#define BANK_B_SIZE         (0x00300000UL - BOOTLOADER_SIZE) /* 0x002E0000 */
+
+#define APP_START_ADDR      BANK_A_START
+
+#define FLASH_MODULE        0
+#define PFLASH_PAGE_LEN     32
+#define PFLASH_SECTOR_SIZE  0x4000UL       /* 16KB */
+
+/* 캐시(0x80xxxxxx) → 비캐시(0xA0xxxxxx) 변환 */
+#define TO_FLASH_ADDR(addr) (((addr) & 0x0FFFFFFFU) | 0xA0000000U)
+
+/* ── PSPR 배치 주소 ─────────────────────────────────────────── */
+#define RELOCATION_START    0x70100000U
+
+#define ERASESECTOR_LEN     256
+#define WAITUNBUSY_LEN      256
+#define ENTERPAGEMODE_LEN   256
+#define LOADPAGE2X32_LEN    256
+#define WRITEPAGE_LEN       256
+#define ERASEWRAPPER_LEN    0x400
+#define WRITEWRAPPER_LEN    0x400
+
+#define ERASESECTOR_ADDR    (RELOCATION_START)
+#define WAITUNBUSY_ADDR     (ERASESECTOR_ADDR   + ERASESECTOR_LEN)
+#define ENTERPAGEMODE_ADDR  (WAITUNBUSY_ADDR    + WAITUNBUSY_LEN)
+#define LOAD2X32_ADDR       (ENTERPAGEMODE_ADDR + ENTERPAGEMODE_LEN)
+#define WRITEPAGE_ADDR      (LOAD2X32_ADDR      + LOADPAGE2X32_LEN)
+#define ERASEWRAPPER_ADDR   (WRITEPAGE_ADDR     + WRITEPAGE_LEN)
+#define WRITEWRAPPER_ADDR   (ERASEWRAPPER_ADDR  + ERASEWRAPPER_LEN)
+
+/* ── OTA Sparse Metadata 정의 ───────────────────────────────── */
+
+#define OTA_META_VERSION          0x00000001UL
+#define OTA_META_MAX_SEGMENTS     8U
+
+/*
+ * DFLASH layout:
+ *
+ * 0xAF000000 + 0x00 : magic         = 0xDEADBEEF
+ * 0xAF000000 + 0x04 : version       = 1
+ * 0xAF000000 + 0x08 : virtualSize   = 전체 CRC 대상 크기
+ * 0xAF000000 + 0x0C : gapFill       = sparse gap fill byte, 현재 0x00
+ * 0xAF000000 + 0x10 : expectedCrc32 = 최종 virtual image CRC
+ * 0xAF000000 + 0x14 : segmentCount
+ * 0xAF000000 + 0x18 : reserved0
+ * 0xAF000000 + 0x1C : reserved1
+ * 0xAF000000 + 0x20 : segment[0]
+ */
+typedef struct
+{
+    uint32 offset;
+    uint32 size;
+    uint32 crc32;
+    uint32 reserved;
+} OtaSegmentMeta_t;
+
+typedef struct
+{
+    uint32 magic;
+    uint32 version;
+
+    uint32 virtualSize;
+    uint32 gapFill;
+
+    uint32 expectedCrc32;
+    uint32 segmentCount;
+
+    uint32 reserved0;
+    uint32 reserved1;
+
+    OtaSegmentMeta_t segments[OTA_META_MAX_SEGMENTS];
+} OtaPendingMeta_t;
+
+/* ── 함수 포인터 구조체 ──────────────────────────────────────── */
+typedef struct
+{
+    void   (*eraseSectorCmd)(uint32 sectorAddr);
+    uint8  (*waitUnbusy)    (uint32 flash, IfxFlash_FlashType flashType);
+    uint8  (*enterPageMode) (uint32 pageAddr);
+    void   (*load2X32bits)  (uint32 pageAddr, uint32 wordL, uint32 wordU);
+    void   (*writePage)     (uint32 pageAddr);
+    uint32 (*eraseWrapper)  (uint32 sectorAddr, uint32 sectorCount, IfxFlash_FlashType flashType);
+    void   (*writePageFull) (uint32 pageAddr, uint8 *buf, IfxFlash_FlashType flashType);
+} OTA_FlashFunc;
+
+/* ── 외부 인터페이스 ─────────────────────────────────────────── */
+boolean OTA_Flash_Erase(uint32 addr, uint32 size, IfxFlash_FlashType flashType);
+boolean OTA_Flash_Write(uint32 addr, uint8 *data, uint16 len, IfxFlash_FlashType flashType);
+boolean OTA_Flash_VerifyCRC(uint32 addr, uint32 size, uint32 expectedCRC);
+void    OTA_Flash_SetFlag(uint32 fwSize, uint32 expectedCRC);
+void    OTA_Flash_ClearFlag(void);
+
+boolean OTA_Flash_ReadPendingMeta(OtaPendingMeta_t *meta);
+boolean OTA_Flash_VerifySparseCRC(uint32 targetBase, const OtaPendingMeta_t *meta);
+
+extern volatile uint32 g_TickCount_1ms;
+
+#endif /* OTA_FLASH_H */

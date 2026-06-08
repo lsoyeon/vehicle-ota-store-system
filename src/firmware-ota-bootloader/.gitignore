@@ -1,0 +1,32 @@
+# Eclipse/ADS 개인 설정
+.settings/
+
+# 빌드 산출물
+TriCore Debug (TASKING)/
+*.elf
+*.hex
+*.map
+*.siz
+*.src
+*.o
+*.d
+
+# 이미지 (용량 큰 경우)
+Images/
+Libraries/Infra/Ssw/TC37A/Tricore/Ifx_Ssw_Infra.h
+Libraries/Ethernet/lwip/port/src/Ifx_Lwip.c
+Libraries/Infra/Ssw/TC37A/Tricore/Ifx_Ssw_Infra.c
+Libraries/Infra/Ssw/TC37A/Tricore/Ifx_Ssw_Infra.h
+Configurations/lwipopts.h
+.vscode/settings.json
+Libraries/Ethernet/lwip/port/src/Ifx_Lwip.c
+Configurations/lwipopts.h
+Libraries/
+Configurations/
+Libraries/Services/
+Libraries/Infra/
+Libraries/.ads/
+Libraries/.ads/clean.json
+Libraries/.ads/install.json
+Libraries/.ads/rollback.json
+Libraries/Infra/Platform/Tricore/Compilers/Compilers.h
