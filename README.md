@@ -1,4 +1,4 @@
-# HAMES 6th Overdrive Archive
+# vehicle-ota-store-system
 
 This repository consolidates selected HAMES 6th Overdrive repositories into a
 single history-preserving archive.
@@ -23,8 +23,7 @@ README and documentation files remain inside each imported project folder.
 ## Layout
 
 - `src/`: imported project source trees.
-- `docs/repositories.md`: source URL, target path, branch, and import commit index.
-- `docs/migration-log.md`: migration procedure and verification notes.
+- `docs/`: empty documentation placeholder.
 
 ## History Lookup
 
