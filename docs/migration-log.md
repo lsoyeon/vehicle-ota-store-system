@@ -36,7 +36,8 @@ git log --oneline -- src/firmware-motor-ecu
 
 ## Temporary Workspace
 
-The import clones were created under:
+The import clones were created under this temporary directory and removed after
+verification:
 
 ```text
 /private/tmp/hames-archive-import.uFiybn
