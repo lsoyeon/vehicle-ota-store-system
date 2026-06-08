@@ -1,0 +1,33 @@
+# Build folders
+.settings/
+Configurations/
+Images/
+Libraries/
+Debug/
+Release/
+build/
+TriCore Debug (TASKING)/
+TriCore Release (TASKING)/
+
+# Build files
+*.o
+*.a
+*.elf
+*.hex
+*.bin
+*.map
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# VS Code
+.vscode/
+
+# Git message
+.gitmessage.txt
+
+.lsl
+.launch
